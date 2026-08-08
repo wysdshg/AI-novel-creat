@@ -1,0 +1,28 @@
+# ---- 依赖 ----
+node_modules/
+.venv/
+venv/
+
+# ---- 数据库（含明文 API Key 与全部作品数据，禁止上传）----
+backend/data/
+
+# ---- 构建产物 ----
+frontend/dist/
+frontend/dist-verify/
+
+# ---- 编辑器 / IDE ----
+.idea/
+
+# ---- 工具数据 ----
+.workbuddy/
+
+# ---- 日志 ----
+*.log
+
+# ---- 临时 / 调试脚本 ----
+_probe.py
+_probe2.py
+_seed.py
+_t.py
+__pycache__/
+*.pyc

@@ -1,0 +1,19 @@
+:root {
+  --na-bg: #f5f7fa;
+  --na-panel: #ffffff;
+  --na-border: #e4e7ed;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--na-bg);
+}
+
+.na-stub-tip {
+  color: #909399;
+  font-size: 13px;
+}
