@@ -351,9 +351,15 @@ def chat(
         # 上下文引擎：把世界观/角色/势力/伏笔/记忆注入商讨，
         # 顾问才能回答「张三现在什么境界」而不是现编。
         # SKILL 注入已在 build_discussion_system 内按 priority + 分类互斥完成。
+        # 取最新一条 user 消息作为设定库相关性检索的 query，让 verbose 描述按需展开。
+        _latest_user = ""
+        for _m in reversed(body.messages or []):
+            if (_m or {}).get("role") == "user":
+                _latest_user = (_m or {}).get("content", "") or ""
+                break
         try:
             sys_prompt, ctx_meta = build_discussion_system(
-                db, project_id, chapter_id=chapter_id
+                db, project_id, chapter_id=chapter_id, query_text=_latest_user
             )
             yield f"event: context\ndata: {json.dumps(ctx_meta, ensure_ascii=False)}\n\n"
         except Exception as e:  # noqa: BLE001

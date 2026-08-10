@@ -189,6 +189,7 @@ def build_discussion_system(
     chapter_no: int | None = None,
     article_id: str | None = None,
     budget_level: str | None = None,
+    query_text: str = "",
 ) -> tuple[str, dict]:
     """组装剧情商讨的系统提示词。
 
@@ -207,7 +208,10 @@ def build_discussion_system(
         if b is not None:
             blocks.append(b)
 
-    _add(layers.layer_world(db, project_id, article_id=article_id))
+    # 设定库按需展开：name+层级阶梯永远保留（模型始终知道有哪些体系），
+    # 仅 verbose description 按相关性展开，避免把所有体系全文常驻塞爆窗口。
+    _add(layers.layer_world(db, project_id, article_id=article_id,
+                            mode="relevant", query_text=query_text))
     _add(layers.layer_characters(db, project_id))
     _add(layers.layer_entities(db, project_id))
     _add(layers.layer_foreshadows(db, project_id))
