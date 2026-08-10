@@ -10,15 +10,23 @@
 
     <el-card shadow="never" class="db-card">
       <el-table :data="list" v-loading="loading" empty-text="暂无势力，点击右上角新建" border stripe>
-        <el-table-column prop="name" label="名称" width="160" fixed />
+        <el-table-column prop="name" label="势力" width="160" fixed />
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
             <el-tag v-if="row.status" :type="statusTag(row.status)" size="small" effect="light">{{ statusText(row.status) }}</el-tag>
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="成员数" width="90" prop="members" :formatter="(r) => (r.members || []).length" />
-        <el-table-column label="描述" min-width="240" show-overflow-tooltip>
+        <el-table-column label="主要成员" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="(row.members || []).length">{{ (row.members || []).join('、') }}</span>
+            <span v-else class="muted">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="势力范围" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.territory || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="相关描述" min-width="240" show-overflow-tooltip>
           <template #default="{ row }">{{ row.description || '—' }}</template>
         </el-table-column>
         <el-table-column label="操作" width="150" fixed="right">
@@ -95,6 +103,7 @@ function openEdit(row) {
     description: row.description,
     status: row.status,
     members: row.members ? [...row.members] : [],
+    territory: row.territory || '',
   })
   editingId.value = row.id
   dialogVisible.value = true

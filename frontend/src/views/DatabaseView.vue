@@ -12,9 +12,27 @@
       </div>
     </div>
 
+    <!-- 筛选栏（按角色类型 / 关键字过滤） -->
+    <div class="db-filter">
+      <el-select v-model="filters.roleType" placeholder="全部地位" clearable style="width:140px">
+        <el-option label="全部地位" value="" />
+        <el-option label="主角" value="主角" />
+        <el-option label="配角" value="配角" />
+        <el-option label="反派" value="反派" />
+      </el-select>
+      <el-input
+        v-model="filters.keyword"
+        placeholder="搜索姓名 / 性格 / 简介 / 等级"
+        clearable
+        style="width:240px"
+        :prefix-icon="Search"
+      />
+      <span class="db-filter-count">共 {{ filteredList.length }} / {{ list.length }} 位角色</span>
+    </div>
+
     <!-- 角色表格 -->
     <el-card shadow="never" class="db-card">
-      <el-table :data="list" v-loading="loading" empty-text="暂无角色，点击右上角新建" border stripe>
+      <el-table :data="filteredList" v-loading="loading" empty-text="暂无角色，点击右上角新建" border stripe>
         <el-table-column prop="name" label="姓名" width="120" fixed />
         <el-table-column label="地位" width="90">
           <template #default="{ row }">
@@ -68,7 +86,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Share } from '@element-plus/icons-vue'
+import { Plus, Share, Search } from '@element-plus/icons-vue'
 import { useProjectStore } from '@/store/project'
 import { characterApi } from '@/api/database'
 import CharacterForm from '@/components/database/CharacterForm.vue'
@@ -83,6 +101,23 @@ const list = ref([])
 const loading = ref(false)
 const dialogVisible = ref(false)
 const editingId = ref(null)
+
+// 筛选：按角色地位 + 关键字（姓名/性格/简介/等级）本地过滤
+const filters = reactive({ roleType: '', keyword: '' })
+const filteredList = computed(() => {
+  const kw = filters.keyword.trim().toLowerCase()
+  return (list.value || []).filter((c) => {
+    if (filters.roleType && c.role_type !== filters.roleType) return false
+    if (kw) {
+      const hay = [c.name, c.personality, c.brief, c.current_level]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+      if (!hay.includes(kw)) return false
+    }
+    return true
+  })
+})
 
 const emptyForm = () => ({
   name: '',
@@ -188,5 +223,13 @@ watch(projectId, load)
 .db-novel { font-size: 13px; color: #909399; font-weight: 400; margin-left: 10px; }
 .db-toolbar-actions { display: flex; gap: 10px; }
 .db-card { margin-bottom: 14px; }
+.db-filter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.db-filter-count { font-size: 12px; color: #909399; }
 .muted { color: #c0c4cc; }
 </style>

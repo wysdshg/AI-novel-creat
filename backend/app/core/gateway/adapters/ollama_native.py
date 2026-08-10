@@ -39,15 +39,75 @@ def _build_request(url: str, payload: dict, api_key: str) -> urllib.request.Requ
     return req
 
 
+# Ollama 运行时默认 num_ctx 仅 2048 token（与模型自身 context_length 无关！），
+# 超出部分会被「从最老的 token 开始」静默丢弃 —— 即 system prompt 开头（世界观 /
+# 官制等权威设定）最先被砍掉，模型看到残缺上下文却毫无报错。
+# 实测：5969 字符的 system prompt，不传 num_ctx 时 prompt_eval_count 仅 2050，
+# 官制设定全丢；传 num_ctx=16384 后为 4827，回答立刻正确。
+#
+# 章节生成走 BUDGET_LEVELS["standard"] = 32000 token，固定 16384 仍会截断，
+# 因此按实际 messages 长度动态放大窗口：短对话省显存、长上下文自动够用。
+_MIN_NUM_CTX = 8192
+_MAX_NUM_CTX = 65536
+
+
+def _estimate_tokens(messages) -> int:
+    """粗估 messages 的 token 数。
+
+    中文约 1 字 ≈ 0.6~1 token，这里按 1 char = 1 token 保守估（宁可窗口开大，
+    也不能让上下文被静默截断）。每条消息再补 8 token 的角色/分隔开销。
+    """
+    total = 0
+    for m in messages or []:
+        total += len(str((m or {}).get("content", ""))) + 8
+    return total
+
+
+def _fit_num_ctx(messages, num_predict: int) -> int:
+    """按需求量向上取到 2 的幂，并夹在 [_MIN_NUM_CTX, _MAX_NUM_CTX]。"""
+    need = _estimate_tokens(messages) + max(int(num_predict or 0), 512) + 512
+    ctx = _MIN_NUM_CTX
+    while ctx < need and ctx < _MAX_NUM_CTX:
+        ctx *= 2
+    return min(ctx, _MAX_NUM_CTX)
+
+
 class OllamaNativeAdapter(BaseModelAdapter):
-    def _opts(self, **params):
-        opts = {}
-        if params.get("temperature") is not None:
-            opts["temperature"] = params["temperature"]
-        if params.get("top_p") is not None:
-            opts["top_p"] = params["top_p"]
-        if params.get("max_tokens") is not None:
-            opts["max_tokens"] = params["max_tokens"]
+    def _opts(self, messages=None, **params):
+        """组装 Ollama 原生 options。
+
+        注意与 OpenAI 兼容层的参数名差异：
+        - 生成长度是 num_predict，不是 max_tokens（传 max_tokens 会被静默忽略）；
+        - 上下文窗口是 num_ctx，不传就退化成 2048，必须显式给足。
+        """
+        opts: dict = {}
+
+        temperature = params.get("temperature")
+        if temperature is None:
+            temperature = self.config.get("temperature")
+        if temperature is not None:
+            opts["temperature"] = temperature
+
+        top_p = params.get("top_p")
+        if top_p is None:
+            top_p = self.config.get("top_p")
+        if top_p is not None:
+            opts["top_p"] = top_p
+
+        # 生成上限：Ollama 原生用 num_predict
+        max_tokens = params.get("max_tokens")
+        if max_tokens is None:
+            max_tokens = self.config.get("max_tokens")
+        if max_tokens:
+            opts["num_predict"] = int(max_tokens)
+
+        # 上下文窗口：必须显式设置，否则长 system prompt 会被静默截断。
+        # 优先级：显式入参 > 模型配置 > 按 messages 实际长度动态推算。
+        num_ctx = params.get("num_ctx") or self.config.get("num_ctx")
+        if not num_ctx:
+            num_ctx = _fit_num_ctx(messages, opts.get("num_predict", 2048))
+        opts["num_ctx"] = int(num_ctx)
+
         return opts
 
     def _chat_url(self) -> str:
@@ -56,7 +116,7 @@ class OllamaNativeAdapter(BaseModelAdapter):
     def _tags_url(self) -> str:
         return f"{_ollama_root(self.config.get('api_base', ''))}/api/tags"
 
-    def _stream(self, messages, think: bool, **params):
+    def _stream(self, messages, think: bool, **params):        # noqa: C901
         """原生流式。think=false 产出 content，think=true 产出 thinking。"""
         url = self._chat_url()
         payload = {
@@ -64,12 +124,9 @@ class OllamaNativeAdapter(BaseModelAdapter):
             "messages": messages,
             "stream": True,
             "think": think,
+            "cache_prompt": True,  # 稳定前缀（system+目录）KV 复用，前缀重传成本≈0
+            "options": self._opts(messages, **params),
         }
-        opts = self._opts(**params)
-        if opts:
-            payload["options"] = opts
-        elif self.config.get("temperature") is not None:
-            payload["options"] = {"temperature": self.config.get("temperature")}
 
         req = _build_request(url, payload, self.config.get("api_key", ""))
         try:
@@ -112,12 +169,9 @@ class OllamaNativeAdapter(BaseModelAdapter):
             "messages": messages,
             "stream": False,
             "think": False,
+            "cache_prompt": True,  # 稳定前缀 KV 复用
+            "options": self._opts(messages, **params),
         }
-        opts = self._opts(**params)
-        if opts:
-            payload["options"] = opts
-        elif self.config.get("temperature") is not None:
-            payload["options"] = {"temperature": self.config.get("temperature")}
         req = _build_request(url, payload, self.config.get("api_key", ""))
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:

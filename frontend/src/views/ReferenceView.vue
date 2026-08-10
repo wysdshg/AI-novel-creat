@@ -1,27 +1,5 @@
 <template>
   <div class="ref-view">
-    <div class="ref-head">
-      <div>
-        <h3>参考文档</h3>
-        <p class="ref-tip">
-          为当前小说上传参考素材（大纲、设定笔记、同人资料、背景资料等），AI 生成章节时会自动读取这些文本作为上下文。
-          支持 <b>.txt / .md / .json / .csv / .log</b> 等文本文件；PDF / Word 等二进制解析后续扩展。
-        </p>
-      </div>
-      <el-upload
-        class="ref-upload"
-        :auto-upload="false"
-        :show-file-list="false"
-        :disabled="!currentNovelId"
-        :on-change="onFileChange"
-        accept=".txt,.md,.markdown,.json,.csv,.log,.text"
-      >
-        <el-button type="primary" :disabled="!currentNovelId">
-          <el-icon><UploadFilled /></el-icon> 上传文档
-        </el-button>
-      </el-upload>
-    </div>
-
     <el-alert
       v-if="!currentNovelId"
       type="info"
@@ -30,26 +8,86 @@
       style="margin-bottom: 12px"
     />
 
-    <el-table v-else :data="docs" border stripe style="width: 100%">
-      <el-table-column prop="filename" label="文件名" min-width="200" />
-      <el-table-column label="类型" width="120">
-        <template #default="{ row }">{{ row.content_type }}</template>
-      </el-table-column>
-      <el-table-column label="大小" width="110">
-        <template #default="{ row }">{{ formatSize(row.size) }}</template>
-      </el-table-column>
-      <el-table-column label="上传时间" width="180">
-        <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
-      </el-table-column>
-      <el-table-column label="操作" width="200" fixed="right">
-        <template #default="{ row }">
-          <el-button size="small" @click="previewDoc(row)">查看</el-button>
-          <el-button size="small" type="danger" @click="removeDoc(row)">删除</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
+    <template v-else>
+      <!-- 参考文档（按小说维度，用户手动上传） -->
+      <section class="ref-section">
+        <div class="ref-head">
+          <div>
+            <h3>参考文档</h3>
+            <p class="ref-tip">
+              为当前小说上传参考素材（大纲、设定笔记、同人资料、背景资料等），AI 生成章节时会自动读取这些文本作为上下文。
+              支持 <b>.txt / .md / .json / .csv / .log</b> 等文本文件；PDF / Word 等二进制解析后续扩展。
+            </p>
+          </div>
+          <el-upload
+            class="ref-upload"
+            :auto-upload="false"
+            :show-file-list="false"
+            :on-change="onFileChange"
+            accept=".txt,.md,.markdown,.json,.csv,.log,.text"
+          >
+            <el-button type="primary">
+              <el-icon><UploadFilled /></el-icon> 上传文档
+            </el-button>
+          </el-upload>
+        </div>
 
-    <el-empty v-if="currentNovelId && !docs.length" description="暂无参考文档，点右上角上传" />
+        <el-table v-if="novelDocs.length" :data="novelDocs" border stripe style="width: 100%">
+          <el-table-column prop="filename" label="文件名" min-width="200" />
+          <el-table-column label="类型" width="120">
+            <template #default="{ row }">{{ row.content_type }}</template>
+          </el-table-column>
+          <el-table-column label="大小" width="110">
+            <template #default="{ row }">{{ formatSize(row.size) }}</template>
+          </el-table-column>
+          <el-table-column label="上传时间" width="180">
+            <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="200" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" @click="previewDoc(row)">查看</el-button>
+              <el-button size="small" type="danger" @click="removeDoc(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-empty v-else description="暂无参考文档，点右上角上传" :image-size="80" />
+      </section>
+
+      <!-- 篇章参考文档（按篇维度，AI 生成章后自动写入，每篇一篇） -->
+      <section class="ref-section">
+        <div class="ref-head">
+          <div>
+            <h3>篇章参考文档</h3>
+            <p class="ref-tip">
+              由 AI 在生成某篇章节后自动汇总写入，按「篇」维度保存，供该篇后续章节生成时参考。
+            </p>
+          </div>
+        </div>
+
+        <el-table v-if="articleDocs.length" :data="articleDocs" border stripe style="width: 100%">
+          <el-table-column prop="filename" label="文件名" min-width="160" />
+          <el-table-column label="所属篇" min-width="160">
+            <template #default="{ row }">{{ articleName(row.article_id) }}</template>
+          </el-table-column>
+          <el-table-column label="类型" width="120">
+            <template #default="{ row }">{{ row.content_type }}</template>
+          </el-table-column>
+          <el-table-column label="大小" width="110">
+            <template #default="{ row }">{{ formatSize(row.size) }}</template>
+          </el-table-column>
+          <el-table-column label="更新时间" width="180">
+            <template #default="{ row }">{{ formatTime(row.updated_at || row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="200" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" @click="previewDoc(row)">查看</el-button>
+              <el-button size="small" type="danger" @click="removeDoc(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-empty v-else description="尚无篇章参考文档（生成章节后自动出现）" :image-size="80" />
+      </section>
+    </template>
 
     <!-- 查看正文弹窗 -->
     <el-dialog v-model="previewVisible" :title="previewDocName" width="70%">
@@ -61,6 +99,7 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { UploadFilled } from '@element-plus/icons-vue'
 import { useProjectStore } from '@/store/project'
 import { referenceApi } from '@/api/reference'
 
@@ -73,10 +112,27 @@ const previewVisible = ref(false)
 const previewDocName = ref('')
 const previewText = ref('')
 
+// 按维度拆分：article_id 为空 = 小说级参考文档；非空 = 篇章参考文档
+const novelDocs = computed(() => docs.value.filter((d) => !d.article_id))
+const articleDocs = computed(() => docs.value.filter((d) => d.article_id))
+
+// 篇 id → 篇名 映射（来自当前小说 4 级结构）
+const articleNameMap = computed(() => {
+  const m = {}
+  for (const v of store.structure.volumes || []) {
+    for (const a of v.articles || []) m[a.id] = a.name
+  }
+  return m
+})
+function articleName(id) {
+  return (id && articleNameMap.value[id]) || '未知篇'
+}
+
 async function loadDocs() {
   if (!currentNovelId.value) { docs.value = []; return }
   loading.value = true
   try {
+    // 后端按 project_id 返回全部（含篇章级），前端再按 article_id 拆分
     docs.value = await referenceApi.list(currentNovelId.value)
   } catch {
     docs.value = []
@@ -156,6 +212,7 @@ watch(currentNovelId, loadDocs)
 
 <style scoped>
 .ref-view { padding: 4px; }
+.ref-section { margin-bottom: 24px; }
 .ref-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
 .ref-head h3 { margin: 0 0 6px; }
 .ref-tip { margin: 0; color: #909399; font-size: 13px; line-height: 1.6; max-width: 760px; }

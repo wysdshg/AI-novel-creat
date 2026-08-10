@@ -8,3 +8,14 @@ export const referenceApi = {
   upload: (projectId, body) => http.post(`/projects/${projectId}/references`, body),
   remove: (projectId, docId) => http.delete(`/projects/${projectId}/references/${docId}`),
 }
+
+// 全局共享参考资料池（「参考资料」）——与小说维度共用后端但 project_id 隔离
+export const globalReferenceApi = {
+  list: () => http.get('/references/global'),
+  get: (docId) => http.get(`/references/global/${docId}`),
+  // body: { filename, content_type, size, content_text }
+  upload: (body) => http.post('/references/global', body),
+  remove: (docId) => http.delete(`/references/global/${docId}`),
+  // 新建小说时，将选中的全局参考资料复制进该小说
+  importToProject: (projectId, docIds) => http.post(`/projects/${projectId}/references/import-global`, { doc_ids: docIds }),
+}

@@ -26,3 +26,11 @@ _seed.py
 _t.py
 __pycache__/
 *.pyc
+
+# ---- 探针 / 冒烟 / 危险脚本（不入库）----
+_probe*.py
+_smoke*.py
+safety_clear_novels.py
+worklog-*.md
+# vite 临时缓存
+*.timestamp-*.mjs

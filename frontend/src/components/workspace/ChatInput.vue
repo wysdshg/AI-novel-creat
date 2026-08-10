@@ -20,7 +20,7 @@
       :prefix="['@']"
       :rows="4"
       resize="none"
-      placeholder="输入对话，讨论本章内容；点击「生成章节」打包本对话与本章要素并生成小说"
+      placeholder="输入对话讨论剧情；或用 /角色 /地点 /势力 /设定 直接添加资料，/章节 第5章 要点 直接生成正文"
       @select="onMentionSelect"
     />
 
@@ -67,10 +67,19 @@
       <el-button :disabled="store.sendingDiscussion" @click="onSend">
         {{ store.sendingDiscussion ? '回复中…' : '发送' }}
       </el-button>
-      <el-button type="primary" @click="onGenerate">生成章节</el-button>
+      <el-tooltip content="请先在左侧选择一篇或一章，再生成章节" :disabled="!!activeArticleId" placement="top">
+        <span>
+          <el-button type="primary" :disabled="!activeArticleId" @click="onGenerate">生成章节</el-button>
+        </span>
+      </el-tooltip>
     </div>
 
-    <GenerateChapterDialog v-model="genVisible" :project-id="store.currentNovelId" :enable-thinking="enableThinking" />
+    <GenerateChapterDialog
+      v-model="genVisible"
+      :project-id="store.currentNovelId"
+      :article-id="activeArticleId"
+      :enable-thinking="enableThinking"
+    />
   </div>
 </template>
 
@@ -78,7 +87,9 @@
 import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useProjectStore } from '@/store/project'
-import { characterApi, factionApi } from '@/api/database'
+import { characterApi, factionApi, commandApi } from '@/api/database'
+import { generateChapterStream } from '@/api/chapter'
+import { parseSlashCommands } from '@/utils/slash'
 import GenerateChapterDialog from './GenerateChapterDialog.vue'
 
 const store = useProjectStore()
@@ -93,6 +104,14 @@ const factions = ref([])
 const enableThinking = ref(false)
 // 当前会话中最近被 @ 的条目 ID（按时间先后放入；越后放表示越近使用）
 const recentlyMentionedIds = ref([])
+
+// 当前有效的「篇」上下文：优先当前选中的篇，其次当前章所属篇；
+// 为空表示还没进入任何篇/章，此时禁止生成章节（避免产出「孤儿章」）。
+const activeArticleId = computed(() => {
+  if (store.currentArticle?.id) return store.currentArticle.id
+  if (store.currentChapter?.article_id) return store.currentChapter.article_id
+  return ''
+})
 
 const quick = ['@角色', '@势力', '@伏笔', '#生成本章', '#只讨论', '#总结剧情']
 
@@ -187,19 +206,111 @@ const onMentionSelect = (option) => {
 const onSend = async () => {
   const content = text.value.trim()
   if (!content) return ElMessage.warning('请输入内容')
-  if (!store.currentNovelId) return ElMessage.warning('请先选择一本小说')
+  // 未选小说时走全局对话模式（不再拦截，store.sendDiscussion 会自动分流）
   if (store.sendingDiscussion) return
+
+  const actions = parseSlashCommands(content)
+  const hasSlash = actions.some((a) => a.kind === 'chapter' || (a.kind === 'config' && a.sub !== '自由'))
+
+  // 没有显式 /指令 时保持原行为：走剧情商讨流
+  if (!hasSlash) {
+    text.value = ''
+    await store.sendDiscussion(content, enableThinking.value)
+    return
+  }
+
+  // Slash 指令模式：确定性执行配置/生成，不走讨论模型
   text.value = ''
-  await store.sendDiscussion(content, enableThinking.value)
+  store.discussionMessages.push({ role: 'user', content })
+  // 配置/slash 指令不走 LLM 商讨流（不会经 router 自动落库），需手动持久化，
+  // 否则重载后「/角色 /地点」等配置语句会消失。
+  await store.appendPersistedMessage('user', content)
+  store.sendingDiscussion = true
+  try {
+    for (const act of actions) {
+      if (act.kind === 'config' && act.sub !== '自由') {
+        await runConfigCommand(act)
+      } else if (act.kind === 'chapter') {
+        await runChapterCommand(act)
+      }
+      // 自由文本在 slash 模式下不额外送入讨论模型，避免与确定性操作混在一起
+    }
+  } catch (e) {
+    store.discussionMessages.push({ role: 'ai', content: '执行失败：' + (e?.message || e) })
+  } finally {
+    store.sendingDiscussion = false
+  }
+}
+
+async function runConfigCommand(act) {
+  // 单次实体指令（角色/地点/势力）透传 entity_type，让后端只抽该类型，不脑补其他实体
+  const entityType = (act.sub === '角色' || act.sub === '地点' || act.sub === '势力') ? act.sub : undefined
+  const res = await commandApi.run(store.currentNovelId, {
+    text: act.prompt || act.text,
+    dry_run: false,
+    entity_type: entityType,
+  })
+  let lines = []
+  if (res.reply) lines.push(res.reply)
+  const groups = []
+  const map = { characters: '角色', factions: '势力', locations: '地点', relations: '关系' }
+  for (const [key, label] of Object.entries(map)) {
+    const items = res.changes?.[key] || []
+    if (items.length) groups.push(`${label}：${items.map((it) => it.name || it.subject).join('、')}`)
+  }
+  if (groups.length) lines.push('已整理：' + groups.join('；'))
+  if (!lines.length) lines.push(`${act.sub}「${act.text}」已处理。`)
+  const text = lines.join('\n')
+  store.discussionMessages.push({ role: 'ai', content: text })
+  await store.appendPersistedMessage('ai', text, { type: 'config', changes: res.changes || null })
+}
+
+async function runChapterCommand(act) {
+  if (!act.chapterNo) {
+    const t = '未识别章节号，请写成「/章节 第5章 <要点>」'
+    store.discussionMessages.push({ role: 'ai', content: t })
+    await store.appendPersistedMessage('ai', t)
+    return
+  }
+  if (!activeArticleId.value) {
+    const t = '请先在左侧选择一篇或一章，再使用 /章节 生成（章节必须归属某一篇）。'
+    store.discussionMessages.push({ role: 'ai', content: t })
+    await store.appendPersistedMessage('ai', t)
+    return
+  }
+  const msg = { role: 'ai', content: `（开始生成第${act.chapterNo}章…）\n`, streaming: true }
+  store.discussionMessages.push(msg)
+  let full = ''
+  try {
+    await generateChapterStream(
+      store.currentNovelId,
+      { chapter_no: act.chapterNo, prompt_hint: act.hint, article_id: activeArticleId.value },
+      (ev, data) => {
+        if (ev === 'chunk' && data?.text) {
+          full += data.text
+          msg.content = full
+        } else if (ev === 'done' && data) {
+          const wc = data.word_count ? `（${data.word_count} 字）` : ''
+          msg.content = full + `\n\n— 已生成并保存第${act.chapterNo}章${wc} —`
+        }
+      },
+    )
+  } catch (e) {
+    msg.content = (full || '') + '\n[生成失败：' + (e?.message || '未知错误') + ']'
+  } finally {
+    msg.streaming = false
+  }
+  await store.appendPersistedMessage('ai', msg.content)
 }
 const onGenerate = () => {
   if (!store.currentNovelId) return ElMessage.warning('请先选择一本小说')
+  if (!activeArticleId.value) return ElMessage.warning('请先在左侧选择一篇或一章，再生成章节')
   genVisible.value = true
 }
 const onClear = async () => {
-  if (!store.currentNovelId) return
+  // store.clearDiscussion 内部已区分：未选小说 → 清全局线程；否则清章/会话线程
   await store.clearDiscussion()
-  ElMessage.success('已清空商讨记录')
+  ElMessage.success('已清空')
 }
 </script>
 

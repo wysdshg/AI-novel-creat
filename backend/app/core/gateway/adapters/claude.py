@@ -23,7 +23,7 @@ def _http_post(api_base: str, api_key: str, payload: dict):
     url = (api_base or "").rstrip("/") + "/messages"
     req = _build_request(url, payload, api_key)
     try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.getcode(), resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "ignore")

@@ -1,6 +1,7 @@
 """作品（项目）隔离管理（API接口规范.md §1）。"""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from typing import Optional, List
 
 from app.schemas.project import ProjectCreate, ProjectUpdate
 from app.core.response import ok, paginated
@@ -50,3 +51,43 @@ def delete_project(project_id: str, db: Session = Depends(get_session)):
     if not ok_flag:
         raise HTTPException(status_code=404, detail="作品不存在")
     return ok({"deleted": project_id})
+
+
+# ---------------------------------------------------------------------------
+# 小说设定库管理
+# ---------------------------------------------------------------------------
+
+@router.get("/projects/{project_id}/settings")
+def get_project_settings(project_id: str, db: Session = Depends(get_session)):
+    """返回本小说选中的设定库 ID 列表及完整设定详情。"""
+    from app.models.orm import ProjectORM
+    orm = db.query(ProjectORM).filter_by(id=project_id).first()
+    if not orm:
+        raise HTTPException(status_code=404, detail="作品不存在")
+    return ok({"setting_ids": orm.setting_ids or []})
+
+
+@router.put("/projects/{project_id}/settings")
+def update_project_settings(
+    project_id: str,
+    body: dict,
+    db: Session = Depends(get_session),
+):
+    """更新本小说选中的设定库（全量替换）。"""
+    from app.models.orm import ProjectORM
+    orm = db.query(ProjectORM).filter_by(id=project_id).first()
+    if not orm:
+        raise HTTPException(status_code=404, detail="作品不存在")
+    ids = body.get("setting_ids")
+    if ids is not None:
+        # 校验所有 id 都存在于全局设定库中
+        from app.models.orm import SettingORM
+        valid_ids = set(r[0] for r in db.query(SettingORM.id).all())
+        invalid = [i for i in ids if i not in valid_ids]
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"无效的设定 ID: {invalid[:5]}")
+        orm.setting_ids = ids
+    else:
+        orm.setting_ids = None  # null = 全量注入（向后兼容）
+    db.commit()
+    return ok({"setting_ids": orm.setting_ids or []})

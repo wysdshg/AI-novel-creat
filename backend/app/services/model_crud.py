@@ -99,7 +99,7 @@ def update_model(db: Session, model_id: str, data: ModelConfigUpdate) -> ModelCo
     for field, value in payload.items():
         setattr(o, field, value)
     o.updated_at = _now()
-    if data.is_default:
+    if getattr(data, 'is_default', None) is True:
         db.query(ModelConfigORM).filter(ModelConfigORM.id != model_id).update(
             {ModelConfigORM.is_default: False}
         )

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_session
 from app.core.response import ok
-from app.schemas.reference import ReferenceDocCreate, ReferenceDoc, ReferenceDocSummary
+from app.schemas.reference import ReferenceDocCreate, ReferenceDoc, ReferenceDocSummary, ReferenceCatalogItem
 from app.services import reference_crud as svc
 
 router = APIRouter(tags=["参考文档"])
@@ -22,6 +22,16 @@ def upload_reference(project_id: str, body: ReferenceDocCreate, db: Session = De
 def list_references(project_id: str, db: Session = Depends(get_session)):
     rows = svc.list_references(db, project_id)
     return ok([r.model_dump(mode="json") for r in rows])
+
+
+@router.get("/projects/{project_id}/references/catalog", summary="参考文件目录（按需加载用，含全局池）")
+def reference_catalog(project_id: str, include_global: bool = True, db: Session = Depends(get_session)):
+    """给 AI / 前端用的「文件清单」：id/名/摘要/标签/token估算/locked。
+
+    include_global=true（默认）时一并列出全局参考资料池，允许在线拉取。
+    """
+    items = svc.build_catalog(db, project_id, include_global=include_global)
+    return ok([it.model_dump(mode="json") for it in items])
 
 
 @router.get("/projects/{project_id}/references/{doc_id}", summary="获取单个参考文档（含正文）")

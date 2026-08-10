@@ -7,6 +7,7 @@
 - POST   /discussion/chat       流式调用默认模型，结束后再把「用户提问 + AI 回复」落库
 """
 import json
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,7 +17,8 @@ from sqlalchemy.orm import Session
 from app.schemas.chapter import DiscussionMessageCreate, DiscussionChatRequest
 from app.core.response import ok
 from app.core.database import get_session
-from app.services import model_crud
+from app.core.context import build_discussion_system
+from app.services import model_crud, character_crud, faction_crud, location_crud
 from app.services.discussion_crud import (
     list_messages,
     add_message,
@@ -24,55 +26,252 @@ from app.services.discussion_crud import (
     archive_to_chapter,
 )
 from app.core.gateway.registry import get_adapter
-from app.models.orm import ChapterORM
+from app.models.orm import ChapterORM, CustomSkillORM
+from app.services import reference_crud as ref_svc
+from app.services.reference_crud import GLOBAL_PROJECT_ID
+from app.services.reference_selector import get_reference_selector
+
+
+def _resolve_model(db: Session, model_id: Optional[str] = None):
+    """根据前端指定的 model_id 查模型配置；不传或查不到则 fallback 到默认模型。
+
+    返回 ModelORM | None（None 表示无可用模型）。
+    """
+    if model_id:
+        m = model_crud.get_model(db, model_id)
+        if m and (m.status or "active") == "active":
+            return m
+    return model_crud.get_default(db)
+
 
 router = APIRouter(tags=["剧情商讨"])
 
 _SYS_PROMPT = (
-    "你是一名专业的小说创作助手，正在和作者讨论本章剧情走向。"
+    "你是一名专业的小说创作助手，正在和作者讨论当前剧情走向。"
     "请基于已有的世界观与人物设定，给出具体、可操作的剧情建议，"
     "保持逻辑与人物一致，语言简洁有启发，不要替作者代写整章正文。\n"
     "【输出格式硬性要求——务必严格遵守】\n"
     "1. 只输出最终回复正文，且必须全部使用中文。\n"
     "2. 严禁输出任何英文（包括 Planning / Revised Plan / Actually / Let's 等），"
     "严禁复述本系统指令，严禁展示你的思考、规划或推理过程。\n"
-    "3. 不要写 ‘好的’‘我来…’ 之类的开场白套话，直接给出建议。\n"
-    "4. 一旦发现自己写出了英文或规划性语句，立即丢弃并只保留中文建议正文。"
+    "3. 不要写 '好的''我来…' 之类的开场白套话，直接给出建议。\n"
+    "4. 一旦发现自己写出了英文或规划性语句，立即丢弃并只保留中文建议正文。\n"
+    "5. 【重要】你没有写入数据库的能力，严禁声称'已添加/已创建/已更新角色档案'。"
+    "当你在对话中识别出新角色、势力或地点时，只需在回复中清晰列出其名称与关键设定，"
+    "系统会自动提示作者确认写入资料库，无需你亲自操作。\n"
+    "6. 不要编造设定条数等精确数字；不清楚就据实列出你知道的名称，不要凭空捏造总数。\n"
+    "7. 作者问「上一句是什么」时，只依据真实对话历史回答；技能示例中的不算真实对话。"
 )
 
 
+# 防御性剥离：模型可能将 LOAD_REFS:<ids> 标记吐到正文/流式 content 中
+# （尤其思考模式下小模型行为不稳定），在发送前端前一律清除。
+_LOAD_REFS_STRIP_RE = re.compile(r"^LOAD_REFS:[0-9a-fA-F,\s]*\s*\n?", re.MULTILINE)
+
+
+def _strip_load_refs(text: str) -> str:
+    """移除文本中可能存在的 LOAD_REFS:<ids> 协议标记，返回干净正文。"""
+    if not text:
+        return text
+    return _LOAD_REFS_STRIP_RE.sub("", text).strip()
+
+
+def _collect_skill_blocks(db: Session) -> str:
+    """收集所有应注入「对话/商讨」场景的 SKILL 内容。
+
+    触发条件：trigger ∈ {discussion, all} 且 enabled=True 且 prompt_body 非空。
+    每条以 "### 名称" 为分隔，正文取 prompt_body.strip()。
+    返回空字符串表示当前没有可用 SKILL（不污染系统提示词）。
+    """
+    try:
+        rows = (
+            db.query(CustomSkillORM)
+            .filter(
+                (CustomSkillORM.trigger == "discussion")
+                | (CustomSkillORM.trigger == "all")
+            )
+            .filter(CustomSkillORM.enabled.is_(True))
+            .order_by(CustomSkillORM.name)
+            .all()
+        )
+    except Exception:
+        # 表尚不存在或查询失败——降级为空段落，不能阻塞对话
+        return ""
+    blocks: list[str] = []
+    for o in rows:
+        body = (o.prompt_body or "").strip()
+        if body:
+            blocks.append(f"### {o.name}\n{body}")
+    if not blocks:
+        return ""
+    return (
+        "\n\n【写作技能合集】以下是当前作者为本次对话/商讨激活的自定义技能，"
+        "请在回复中自然遵守这些技能的指引与约束；"
+        "不要主动告诉作者'我已读取了N条技能'，按其精神执行即可：\n\n"
+        + "\n\n".join(blocks)
+    )
+
+
 def _to_frontend(m) -> dict:
-    """ORM → 前端可渲染的消息结构（role 统一为 user/ai）。"""
+    """ORM → 前端可渲染的消息结构（role 统一为 user/ai）。
+
+    meta 一并带出：章后走向卡片靠 meta.type == 'post_chapter_directions' 识别，
+    前端据此渲染成可点击的选项卡而不是一坨文字。
+    """
+    meta = m.meta or {}
     return {
         "id": m.id,
         "role": "ai" if m.role == "assistant" else "user",
         "content": m.content or "",
         "thinking": m.thinking or "",
+        "meta": meta,
+        "type": meta.get("type") or "text",
         "created_at": m.created_at.isoformat() if m.created_at else None,
     }
 
 
+def _build_entity_suggestion(db: Session, project_id: str, user_text: str, ai_text: str, model_id: str | None = None):
+    """从对话（用户提问 + AI 回复）中识别可建的新实体，返回建议列表供前端确认写入。
+
+    改进（v2）：
+    - 查库去重：已存在的实体不再建议
+    - 透传完整属性：LLM 抽到的 personality/talent/skills/brief 等全部保留
+    - 数量上限：最多建议 5 条，避免刷屏
+    - 过滤无效名：纯描述性/组织体系类名称过滤掉
+    - 抽取模型：用调用方透传的 model_id（用户对话中选择的模型），不传则回退默认模型
+    """
+    combined = f"用户说：{user_text or ''}\nAI 回复：{ai_text or ''}"
+    if len(combined.strip()) < 15:
+        return None
+    # 启发式预筛：无相关关键词则跳过 LLM 调用
+    _KW = ("角色", "人物", "主角", "配角", "反派", "县尉", "知县", "官员",
+           "门派", "地点", "城市", "秘境", "设定", "境界", "家族", "姓名",
+           "添加角色", "新角色", "新建")
+    if not any(k in combined for k in _KW):
+        return None
+    try:
+        from app.services.config_command import run as config_run
+        # 用对话所选模型抽取（model_id 为 None 时回退默认模型）
+        res = config_run(db, project_id, combined, dry_run=True, model_id=model_id)
+    except Exception:
+        return None
+
+    data = res.get("data", {})
+    changes = data.get("changes", {})
+
+    # ---- 去重：查库中已有实体 ----
+    existing_chars = {c.name for c in character_crud.list_characters(db, project_id)}
+    existing_factions = {f.name for f in faction_crud.list_factions(db, project_id)}
+    existing_locs = {l.name for l in location_crud.list_locations(db, project_id)}
+
+    # ---- 无效名过滤（组织体系/泛称/纯描述）----
+    _SKIP_PATTERNS = ("体系", "制度", "规则", "部门", "机构", "如(", "（如")
+
+    def _should_skip(name):
+        if not name or len(name) < 2:
+            return True
+        return any(p in name for p in _SKIP_PATTERNS)
+
+    items = []
+    MAX_SUGGESTIONS = 5
+
+    for c in (changes.get("characters") or []):
+        if len(items) >= MAX_SUGGESTIONS:
+            break
+        name = (c.get("name") or "").strip()
+        if not name or name in existing_chars or _should_skip(name):
+            continue
+        entry = {"kind": "character", "name": name}
+        # 透传 LLM 抽到的所有属性字段
+        for attr in ("personality", "background", "talent", "current_level",
+                      "role_type", "age", "gender", "brief"):
+            val = c.get(attr)
+            if val is not None and str(val).strip():
+                entry[attr] = val
+        # skills / relationship_network 是列表型
+        if c.get("skills"):
+            entry["skills"] = c["skills"] if isinstance(c["skills"], list) else [c["skills"]]
+        if c.get("relationship_network"):
+            entry["relationship_network"] = (
+                c["relationship_network"]
+                if isinstance(c["relationship_network"], list)
+                else [c["relationship_network"]]
+            )
+        items.append(entry)
+
+    for f_item in (changes.get("factions") or []):
+        if len(items) >= MAX_SUGGESTIONS:
+            break
+        name = (f_item.get("name") or "").strip()
+        if not name or name in existing_factions or _should_skip(name):
+            continue
+        entry = {"kind": "faction", "name": name}
+        for attr in ("description", "territory", "status"):
+            val = f_item.get(attr)
+            if val is not None and str(val).strip():
+                entry[attr] = val
+        items.append(entry)
+
+    for l_item in (changes.get("locations") or []):
+        if len(items) >= MAX_SUGGESTIONS:
+            break
+        name = (l_item.get("name") or "").strip()
+        if not name or name in existing_locs or _should_skip(name):
+            continue
+        entry = {"kind": "location", "name": name}
+        for attr in ("description", "region", "location_type"):
+            val = l_item.get(attr)
+            if val is not None and str(val).strip():
+                entry[attr] = val
+        items.append(entry)
+
+    return {"items": items} if items else None
+
+
 @router.get("/projects/{project_id}/discussion")
-def get_discussion(project_id: str, db: Session = Depends(get_session)):
-    """返回当前商讨缓存（已持久化、未归档）消息列表。"""
-    return ok([_to_frontend(m) for m in list_messages(db, project_id)])
+def get_discussion(
+    project_id: str,
+    chapter_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    db: Session = Depends(get_session),
+):
+    """返回当前商讨缓存（已持久化、未归档）消息列表。
+
+    线程优先级：conversation_id > chapter_id > 小说级默认线程。
+    """
+    return ok([_to_frontend(m) for m in list_messages(db, project_id, chapter_id=chapter_id, conversation_id=conversation_id)])
 
 
 @router.post("/projects/{project_id}/discussion/messages")
 def append_message(
     project_id: str,
     body: DiscussionMessageCreate,
+    chapter_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
     db: Session = Depends(get_session),
 ):
     """手动追加一条商讨消息（闲聊、不调模型）。"""
-    m = add_message(db, project_id, body.role, body.content)
+    m = add_message(
+        db,
+        project_id,
+        body.role,
+        body.content,
+        meta=body.meta,
+        chapter_id=chapter_id,
+        conversation_id=conversation_id,
+    )
     return ok(_to_frontend(m))
 
 
 @router.delete("/projects/{project_id}/discussion")
-def clear_discussion(project_id: str, db: Session = Depends(get_session)):
-    """清空当前商讨缓存。"""
-    n = clear_messages(db, project_id)
+def clear_discussion(
+    project_id: str,
+    chapter_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    db: Session = Depends(get_session),
+):
+    """清空当前商讨缓存。线程优先级：conversation_id > chapter_id > 小说级默认线程。"""
+    n = clear_messages(db, project_id, chapter_id=chapter_id, conversation_id=conversation_id)
     return ok({"cleared": project_id, "count": n})
 
 
@@ -80,13 +279,14 @@ def clear_discussion(project_id: str, db: Session = Depends(get_session)):
 def archive_discussion(
     project_id: str,
     chapter_id: str,
+    conversation_id: Optional[str] = None,
     db: Session = Depends(get_session),
 ):
     """将当前商讨草稿归档为指定章节备注，并移出当前缓存。"""
     chapter = db.query(ChapterORM).filter_by(id=chapter_id, project_id=project_id).first()
     if chapter is None:
         raise HTTPException(status_code=404, detail="章节不存在")
-    result = archive_to_chapter(db, project_id, chapter_id)
+    result = archive_to_chapter(db, project_id, chapter_id, conversation_id=conversation_id)
     return ok(result)
 
 
@@ -94,18 +294,44 @@ def archive_discussion(
 def chat(
     project_id: str,
     body: DiscussionChatRequest,
+    chapter_id: Optional[str] = None,
     db: Session = Depends(get_session),
 ):
-    """剧情商讨：用默认模型流式回复用户（SSE）。结束后把本轮对话落库。"""
-    default = model_crud.get_default(db)
+    """剧情商讨：用默认模型流式回复用户（SSE）。结束后把本轮对话落库。
+
+    线程归属：conversation_id 给定 → 归属该会话线程；否则 chapter_id 给定 → 归属章线程；
+    否则归属小说级默认线程。
+    """
+    default = _resolve_model(db, body.model_id)
     use_model = default is not None and (default.status or "active") == "active"
 
-    # 取最近一条 user 消息，用于结束后的持久化
+    # ▼▼▼ 请求日志（调试用，前端发什么后端收什么）▼▼▼
+    print("=" * 60)
+    print(f"[discussion/chat] 收到请求 project_id={project_id} chapter_id={chapter_id}")
+    print(f"  请求体 model_id={body.model_id} enable_thinking={body.enable_thinking} conversation_id={body.conversation_id}")
+    print(f"  消息条数={len(body.messages)}")
+    for i, m in enumerate(body.messages):
+        role = (m or {}).get("role", "?")
+        content = (m or {}).get("content", "") or ""
+        print(f"    [{i}] {role}: {content[:160]}{'...' if len(content) > 160 else ''}")
+    print(f"  use_model={use_model} default_model={default.model_name if default else None}")
+    print("=" * 60)
+    # ▲▲▲ 请求日志结束 ▲▲▲
+
+    # 取最近一条 user 消息，用于持久化
     last_user_content = ""
     for m in reversed(body.messages):
         if (m or {}).get("role") == "user":
             last_user_content = (m or {}).get("content", "") or ""
             break
+
+    # 用户消息立即落库（不等流结束），防止中途退出时消息丢失
+    if last_user_content:
+        try:
+            conv_id = body.conversation_id
+            add_message(db, project_id, "user", last_user_content, chapter_id=chapter_id, conversation_id=conv_id)
+        except Exception:
+            pass
 
     def event_stream():
         if not use_model:
@@ -122,7 +348,35 @@ def chat(
             "max_tokens": default.max_tokens,
             "enable_thinking": default.enable_thinking if body.enable_thinking is None else body.enable_thinking,
         }
-        messages = [{"role": "system", "content": _SYS_PROMPT}]
+        # 上下文引擎：把世界观/角色/势力/伏笔/记忆注入商讨，
+        # 顾问才能回答「张三现在什么境界」而不是现编。
+        # SKILL 注入已在 build_discussion_system 内按 priority + 分类互斥完成。
+        try:
+            sys_prompt, ctx_meta = build_discussion_system(
+                db, project_id, chapter_id=chapter_id
+            )
+            yield f"event: context\ndata: {json.dumps(ctx_meta, ensure_ascii=False)}\n\n"
+        except Exception as e:  # noqa: BLE001
+            print(f"[discussion/chat] 上下文组装失败，降级: {e}")
+            sys_prompt = _SYS_PROMPT + _collect_skill_blocks(db)
+
+        # 按需加载目录：把「可用参考文件清单」作为稳定前缀挂到 system（配合 Ollama cache_prompt 缓存，
+        # 后续轮次前缀 KV 复用）。AI 仅在需要时通过 LOAD_REFS:<ids> 请求加载具体正文，避免全量塞爆窗口。
+        try:
+            catalog = ref_svc.build_catalog(db, project_id, article_id=chapter_id, include_global=True)
+            catalog_text = ref_svc.format_catalog_prompt(catalog, include_global=True)
+            if catalog_text:
+                sys_prompt = (
+                    sys_prompt
+                    + catalog_text
+                    + "\n\n## 参考加载协议\n当你判断回答需要用到上面「可用参考文件目录」中的某份资料时，"
+                    "先只输出一行 `LOAD_REFS:<id1>,<id2>` 然后停止，我会把对应正文注入后再请你继续回答。"
+                    "若不需要任何参考，直接正常回答即可。\n"
+                )
+        except Exception as e:  # noqa: BLE001
+            print(f"[discussion/chat] 目录构造失败，跳过: {e}")
+
+        messages = [{"role": "system", "content": sys_prompt}]
         for m in body.messages:
             content = (m or {}).get("content", "")
             if content:
@@ -132,30 +386,86 @@ def chat(
         want_thinking = body.enable_thinking if body.enable_thinking is not None else default.enable_thinking
         temperature = body.temperature or default.temperature
 
+        # 参考「选择阶段」策略：默认 marker(A)，未来强 API 可切 toolcall(B)。见 reference_selector。
+        ref_selector = get_reference_selector()
+
         assistant_text: list[str] = []
         assistant_thinking: list[str] = []
         try:
             adapter = get_adapter(default.vendor, config)
+            print(f'[discussion] 模型={default.model_name} ({default.vendor}) | api_base={default.api_base[:50]} | thinking={want_thinking}')
 
-            # 1) 思考过程（可选）：仅 Ollama 原生适配器支持 stream_thinking
-            if want_thinking and hasattr(adapter, "stream_thinking"):
-                for t in adapter.stream_thinking(messages, temperature=temperature):
-                    assistant_thinking.append(t)
-                    yield f"event: thinking\ndata: {json.dumps({'text': t}, ensure_ascii=False)}\n\n"
+            # ---- 按需参考加载（两阶段）----
+            # Pass1：非流式、think=false，让模型决定是否需要参考文件（输出 LOAD_REFS:<ids>）或直接作答。
+            # 只有被选中的文件正文才会进入上下文，避免全量塞爆窗口；无需参考时仅 1 次调用。
+            first_text = ""
+            if hasattr(adapter, "chat"):
+                try:
+                    first_text = adapter.chat(messages, temperature=temperature, enable_thinking=want_thinking)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[discussion/chat] Pass1 失败，降级单次流式: {e}")
+                    first_text = ""
 
-            # 2) 正文/回复：始终使用 think=false 的干净内容（Ollama 原生适配器保证）
-            for delta in adapter.stream(messages, temperature=temperature):
-                assistant_text.append(delta)
-                yield f"event: chunk\ndata: {json.dumps({'text': delta}, ensure_ascii=False)}\n\n"
+            selected_ids = ref_selector.select(first_text) if first_text else None
+
+            if selected_ids:
+                load_ids = list(dict.fromkeys(selected_ids))  # 去重保序
+                blocks = ref_svc.fetch_refs_by_ids(db, load_ids)
+                if blocks:
+                    loaded = "\n\n".join(f"【参考资料：{fn}】\n{txt}" for fn, txt in blocks)
+                    messages.append({
+                        "role": "user",
+                        "content": f"已按你的请求加载以下参考资料正文，请据此作答：\n\n{loaded}",
+                    })
+                    yield f"event: refs\ndata: {json.dumps({'loaded': [fn for fn, _ in blocks], 'ids': load_ids}, ensure_ascii=False)}\n\n"
+                    # Pass2：流式生成最终回复（带思考，按用户偏好）
+                    if want_thinking and hasattr(adapter, "stream_thinking"):
+                        for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
+                            assistant_thinking.append(t)
+                            yield f"event: thinking\ndata: {json.dumps({'text': t}, ensure_ascii=False)}\n\n"
+                    for delta in adapter.stream(messages, temperature=temperature, enable_thinking=want_thinking):
+                        clean = _strip_load_refs(delta)
+                        if clean:
+                            assistant_text.append(clean)
+                            yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
+                else:
+                    # 选中 id 无效：提示后直接作答，避免循环
+                    messages.append({"role": "user", "content": "你请求的参考资料未能加载（id 无效），请直接作答。"})
+                    if want_thinking and hasattr(adapter, "stream_thinking"):
+                        for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
+                            assistant_thinking.append(t)
+                            yield f"event: thinking\ndata: {json.dumps({'text': t}, ensure_ascii=False)}\n\n"
+                    for delta in adapter.stream(messages, temperature=temperature, enable_thinking=want_thinking):
+                        clean = _strip_load_refs(delta)
+                        if clean:
+                            assistant_text.append(clean)
+                            yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
+            else:
+                if first_text:
+                    # 模型判断无需参考：Pass1 即最终回答，单调用（省一次）
+                    clean = _strip_load_refs(first_text)
+                    if clean:
+                        assistant_text.append(clean)
+                        yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
+                else:
+                    # chat 不可用：退回单次流式（旧行为）
+                    if want_thinking and hasattr(adapter, "stream_thinking"):
+                        for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
+                            assistant_thinking.append(t)
+                            yield f"event: thinking\ndata: {json.dumps({'text': t}, ensure_ascii=False)}\n\n"
+                    for delta in adapter.stream(messages, temperature=temperature, enable_thinking=want_thinking):
+                        clean = _strip_load_refs(delta)
+                        if clean:
+                            assistant_text.append(clean)
+                            yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
         except Exception as e:  # noqa: BLE001
             yield f"event: chunk\ndata: {json.dumps({'text': f'[模型调用失败：{str(e)[:200]}]'}, ensure_ascii=False)}\n\n"
         finally:
             yield "event: done\ndata: {}\n\n"
-            # 持久化本轮对话：用户提问 + AI 回复（含思考过程）
+            # 持久化 AI 回复（用户消息已在流开始前落库）
             try:
                 full = "".join(assistant_text)
-                if last_user_content:
-                    add_message(db, project_id, "user", last_user_content)
+                conv_id = body.conversation_id
                 if full:
                     add_message(
                         db,
@@ -164,8 +474,253 @@ def chat(
                         full,
                         thinking="".join(assistant_thinking) or None,
                         meta={"enable_thinking": bool(want_thinking)},
+                        chapter_id=chapter_id,
+                        conversation_id=conv_id,
                     )
             except Exception as e:  # noqa: BLE001
                 print(f"[discussion/chat] 持久化失败: {e}")
+            # 抽取对话中建议的新实体，推送给前端供作者确认写入资料库
+            # 复用用户本轮对话选择的模型（default 即 _resolve_model 解析结果），不固定 Ollama/默认
+            try:
+                suggestion = _build_entity_suggestion(
+                    db, project_id, last_user_content, "".join(assistant_text),
+                    model_id=default.id if default else None,
+                )
+                if suggestion:
+                    yield "event: entity_suggestion\ndata: " + json.dumps(suggestion, ensure_ascii=False) + "\n\n"
+            except Exception as e:  # noqa: BLE001
+                print(f"[discussion/chat] 实体建议抽取失败: {e}")
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ===========================================================================
+# 全局对话（无需选择小说，类似豆包/ChatGPT 通用助手模式）
+# ===========================================================================
+
+# 全局对话携带的历史上文字符预算。system prompt 约 6k 字符，
+# 叠加后需留足生成空间，控制在 Ollama 适配器 num_ctx=16384 之内。
+_GLOBAL_HISTORY_CHAR_BUDGET = 8000
+
+_GLOBAL_SYS = (
+    "你是一名专业的小说创作助手（全局模式）。\n"
+    "你可以回答关于写作技巧、世界观设定、角色设计、古代官制、修仙体系等任何问题。\n"
+    "当问题涉及特定世界观（如官制、境界体系）时，以下资料为权威参考，回答必须以资料为准：\n\n"
+    "【注意】\n"
+    "1. 不要编造设定条数等精确数字；不清楚就据实列出你知道的名称，不要凭空捏造总数。\n"
+    "2. 作者问「上一句是什么」时，只依据真实对话历史回答；技能示例中的不算真实对话。"
+)
+
+
+def _build_global_system(db: Session) -> str:
+    """构建全局对话的 system prompt（仅含全局设定库 + 全局 SKILL，不含任何小说数据）。"""
+    parts = [_GLOBAL_SYS]
+
+    # 注入全局设定库（SettingORM 无 project_id，天然全局）
+    # 排序优化：体系（官制等知识问答高频）排在最前，确保小模型注意力优先落在上面；
+    # 其次境界/货币/规则/其它。
+    from app.models.orm import SettingORM
+    _CAT_ORDER = {"体系": 0, "境界": 1, "货币": 2, "规则": 3}
+    rows = db.query(SettingORM).all()
+    rows.sort(key=lambda s: (_CAT_ORDER.get(s.category or "其它", 99), s.name))
+    if rows:
+        by_cat: dict[str, list[str]] = {}
+        for s in rows:
+            desc = (s.description or "").strip()
+            levels = s.levels or []
+            piece = f"{s.name}"
+            if levels:
+                shown = "→".join(str(x) for x in levels[:12])
+                piece += f"（{shown}{'…' if len(levels) > 12 else ''}）"
+            if desc:
+                piece += f"：{desc}"
+            by_cat.setdefault(s.category or "其它", []).append(piece)
+        if by_cat:
+            lines = []
+            for cat, items in by_cat.items():
+                lines.append(f"[{cat}] " + "；".join(items))
+            parts.append("【世界观数据库（权威参考）】\n" + "\n".join(lines))
+            parts.append("\n⚠️ 以上数据为作者设定的权威资料，回答相关问题必须以此为准。")
+
+    # 注入全局 SKILL
+    skill_block = _collect_skill_blocks(db)
+    if skill_block:
+        parts.append(skill_block)
+
+    return "\n\n".join(parts)
+
+
+@router.post("/discussion/global-chat")
+def global_chat(
+    body: DiscussionChatRequest,
+    db: Session = Depends(get_session),
+):
+    """全局对话：不依赖任何小说，使用全局设定库+SKILL 作为上下文。
+
+    适用场景：用户未选择小说时的通用问答（如询问官制、境界体系等）。
+    消息持久化到 project_id="__global__" 的默认线程，刷新/重进后仍保留记忆。
+    """
+    default = _resolve_model(db, body.model_id)
+    use_model = default is not None and (default.status or "active") == "active"
+
+    last_user_content = ""
+    for m in reversed(body.messages):
+        if (m or {}).get("role") == "user":
+            last_user_content = (m or {}).get("content", "") or ""
+            break
+
+    # 【关键】用户消息立即落库（不等流结束）。
+    # 原因：流式回复可能耗时较长，若用户中途退出/刷新页面，前端内存消息丢失，
+    # 而 finally 中的持久化还未执行 → 重进后消息消失。
+    # 提前写入后，loadDiscussion 能立刻拉到这条消息。
+    if last_user_content:
+        try:
+            add_message(db, GLOBAL_PROJECT_ID, "user", last_user_content)
+        except Exception:
+            pass  # 持久化失败不阻断主流程
+
+    def event_stream():
+        if not use_model:
+            yield f"event: chunk\ndata: {json.dumps({'text': '[未配置可用模型，请在「模型配置」中添加并设为默认]'}, ensure_ascii=False)}\n\n"
+            yield "event: done\ndata: {}\n\n"
+            return
+
+        config = {
+            "api_base": default.api_base,
+            "api_key": default.api_key,
+            "model_name": default.model_name,
+            "temperature": default.temperature,
+            "top_p": default.top_p,
+            "max_tokens": default.max_tokens,
+            "enable_thinking": default.enable_thinking if body.enable_thinking is None else body.enable_thinking,
+        }
+
+        try:
+            sys_prompt = _build_global_system(db)
+            ctx_meta = {"mode": "global", "global_chat": True}
+            yield f"event: context\ndata: {json.dumps(ctx_meta, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            print(f"[discussion/global-chat] 上下文组装失败，降级: {e}")
+            sys_prompt = _SYS_PROMPT + _collect_skill_blocks(db)
+
+        # 全局参考文档目录（可选注入）
+        try:
+            catalog = ref_svc.build_catalog(db, GLOBAL_PROJECT_ID, include_global=True)
+            catalog_text = ref_svc.format_catalog_prompt(catalog, include_global=True)
+            if catalog_text:
+                sys_prompt = (
+                    sys_prompt
+                    + catalog_text
+                    + "\n\n## 参考加载协议\n当你判断需要用到上面「可用参考文件目录」中的资料时，"
+                    "先只输出一行 `LOAD_REFS:<id1>,<id2>` 然后停止，我会把对应正文注入后再请你继续回答。"
+                    "若不需要任何参考，直接正常回答即可。\n"
+                )
+        except Exception as e:
+            print(f"[discussion/global-chat] 目录构造失败，跳过: {e}")
+
+        # 历史裁剪：system prompt 已占约 6k 字符。全局对话现在有记忆（落库后每轮都会
+        # 带上完整历史），若不限长，连续对话很快顶爆模型上下文窗口 —— 而 Ollama 超窗
+        # 是「从最老 token 静默丢弃」，最先被丢的正是 system 里的世界观设定，
+        # 表现为「聊几轮之后 AI 突然不认识官制了」。故只保留预算内的最近若干轮。
+        kept: list[dict] = []
+        used = 0
+        for m in reversed(body.messages or []):
+            content = (m or {}).get("content", "")
+            if not content:
+                continue
+            if kept and used + len(content) > _GLOBAL_HISTORY_CHAR_BUDGET:
+                break
+            kept.append({"role": (m or {}).get("role", "user"), "content": content})
+            used += len(content)
+        kept.reverse()
+
+        messages = [{"role": "system", "content": sys_prompt}] + kept
+
+        want_thinking = body.enable_thinking if body.enable_thinking is not None else default.enable_thinking
+        temperature = body.temperature or default.temperature
+
+        ref_selector = get_reference_selector()
+
+        assistant_text: list[str] = []
+        assistant_thinking: list[str] = []
+        try:
+            adapter = get_adapter(default.vendor, config)
+            print(f'[discussion] 模型={default.model_name} ({default.vendor}) | api_base={default.api_base[:50]} | thinking={want_thinking}')
+
+            first_text = ""
+            if hasattr(adapter, "chat"):
+                try:
+                    first_text = adapter.chat(messages, temperature=temperature, enable_thinking=want_thinking)
+                except Exception as e:
+                    print(f"[discussion/global-chat] Pass1 失败，降级单次流式: {e}")
+                    first_text = ""
+
+            selected_ids = ref_selector.select(first_text) if first_text else None
+
+            if selected_ids:
+                load_ids = list(dict.fromkeys(selected_ids))
+                blocks = ref_svc.fetch_refs_by_ids(db, load_ids)
+                if blocks:
+                    loaded = "\n\n".join(f"【参考资料：{fn}】\n{txt}" for fn, txt in blocks)
+                    messages.append({
+                        "role": "user",
+                        "content": f"已按你的请求加载以下参考资料正文，请据此作答：\n\n{loaded}",
+                    })
+                    yield f"event: refs\ndata: {json.dumps({'loaded': [fn for fn, _ in blocks], 'ids': load_ids}, ensure_ascii=False)}\n\n"
+                    if want_thinking and hasattr(adapter, "stream_thinking"):
+                        for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
+                            assistant_thinking.append(t)
+                            yield f"event: thinking\ndata: {json.dumps({'text': t}, ensure_ascii=False)}\n\n"
+                    for delta in adapter.stream(messages, temperature=temperature, enable_thinking=want_thinking):
+                        clean = _strip_load_refs(delta)
+                        if clean:
+                            assistant_text.append(clean)
+                            yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
+                else:
+                    messages.append({"role": "user", "content": "你请求的参考资料未能加载（id 无效），请直接作答。"})
+                    if want_thinking and hasattr(adapter, "stream_thinking"):
+                        for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
+                            assistant_thinking.append(t)
+                            yield f"event: thinking\ndata: {json.dumps({'text': t}, ensure_ascii=False)}\n\n"
+                    for delta in adapter.stream(messages, temperature=temperature, enable_thinking=want_thinking):
+                        clean = _strip_load_refs(delta)
+                        if clean:
+                            assistant_text.append(clean)
+                            yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
+            else:
+                if first_text:
+                    clean = _strip_load_refs(first_text)
+                    if clean:
+                        assistant_text.append(clean)
+                        yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
+                else:
+                    if want_thinking and hasattr(adapter, "stream_thinking"):
+                        for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
+                            assistant_thinking.append(t)
+                            yield f"event: thinking\ndata: {json.dumps({'text': t}, ensure_ascii=False)}\n\n"
+                    for delta in adapter.stream(messages, temperature=temperature, enable_thinking=want_thinking):
+                        clean = _strip_load_refs(delta)
+                        if clean:
+                            assistant_text.append(clean)
+                            yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            yield f"event: chunk\ndata: {json.dumps({'text': f'[模型调用失败：{str(e)[:200]}]'}, ensure_ascii=False)}\n\n"
+        finally:
+            yield "event: done\ndata: {}\n\n"
+            # 持久化 AI 回复到全局线程（用户消息已在流开始前落库）。
+            try:
+                full = "".join(assistant_text)
+                if full:
+                    add_message(
+                        db,
+                        GLOBAL_PROJECT_ID,
+                        "assistant",
+                        full,
+                        thinking="".join(assistant_thinking) or None,
+                        meta={"enable_thinking": bool(want_thinking), "global_chat": True},
+                    )
+            except Exception as e:  # noqa: BLE001
+                print(f"[discussion/global-chat] 持久化失败: {e}")
+                print(f"[discussion/global-chat] 持久化失败: {e}")
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

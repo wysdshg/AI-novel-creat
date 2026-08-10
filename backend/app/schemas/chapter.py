@@ -12,6 +12,7 @@ class GenerateRequest(BaseModel):
     word_range: dict = Field(default_factory=lambda: {"min": 3000, "max": 5000})
     temperature: float = Field(0.4, ge=0, le=1)
     enable_thinking: Optional[bool] = None
+    article_id: Optional[str] = None          # 4 级结构：生成章节时必属某篇（可空兼容旧调用）
 
 
 class ChapterBase(BaseModel):
@@ -20,6 +21,7 @@ class ChapterBase(BaseModel):
     content: str = ""
     note: Optional[str] = None                # 商讨归档备注
     word_count: int = 0
+    article_id: Optional[str] = None          # 隶属篇（article）；4 级结构下一章必属于一篇
 
 
 class ChapterCreate(ChapterBase):
@@ -47,10 +49,16 @@ class DiscussionMessage(BaseModel):
 class DiscussionMessageCreate(BaseModel):
     role: Literal["user", "assistant"] = "user"
     content: str
+    meta: Optional[dict] = None
+    conversation_id: Optional[str] = None
 
 
 class DiscussionChatRequest(BaseModel):
-    """剧情商讨：前端传完整对话历史，后端用默认模型流式回复。"""
+    """剧情商讨/全局对话：前端传完整对话历史 + 可选模型 ID，后端用指定或默认模型流式回复。"""
+    model_config = {"protected_namespaces": ()}
+
     messages: List[dict] = Field(default_factory=list)  # [{role:'user'|'assistant', content}]
     enable_thinking: Optional[bool] = None
     temperature: Optional[float] = None
+    conversation_id: Optional[str] = None
+    model_id: Optional[str] = None  # 前端指定模型 ID；不传则 fallback 到默认模型

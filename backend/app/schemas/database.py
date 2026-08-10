@@ -104,7 +104,8 @@ class FactionBase(BaseModel):
     name: str
     description: Optional[str] = None
     leader_id: Optional[str] = None
-    members: List[str] = []                   # 角色ID
+    members: List[str] = []                   # 角色ID / 成员名称
+    territory: Optional[str] = None           # 势力范围
     status: Optional[str] = None
 
 
@@ -117,6 +118,7 @@ class FactionUpdate(BaseModel):
     description: Optional[str] = None
     leader_id: Optional[str] = None
     members: Optional[List[str]] = None
+    territory: Optional[str] = None
     status: Optional[str] = None
 
 
@@ -226,6 +228,7 @@ class ValidateResult(BaseModel):
 class CommandRequest(BaseModel):
     text: str
     dry_run: bool = False
+    entity_type: Optional[str] = None  # 角色/地点/势力：单次实体指令只抽该类型，避免顺带脑补其他实体
 
 
 class CommandResult(BaseModel):

@@ -19,6 +19,17 @@ from app.routers import (
     direction,
     template,
     references,
+    # ——本轮（用户大任务 1）新增的三大全局模块：——
+    setting,         # /settings      全局设定库（境界/货币/体系/规则）
+    custom_skill,    # /global-skills 自定义写作 SKILL 模板（与资料库 Skill 区分）
+    workflow,        # /workflows     全局工作流（节点+边的 DAG 模板）
+    # ——本轮（用户大任务 2 第 2 批）：4 级结构 小说→卷→篇→章 ——
+    volume,          # /volumes       卷（volume）
+    article,         # /articles      篇（article）+ /articles/{aid}/chapters
+    # ——本轮（用户大任务 2 第 3 批）：参考三概念 ——
+    reference_global,  # /references/global 全局共享参考资料池 + import-global
+    # ——AI 能力层：去AI味检测 / SKILL 调度查询 / 全局配置 / 实体确认入库 ——
+    assist,
 )
 
 app = FastAPI(
@@ -37,7 +48,14 @@ app.add_middleware(
 )
 
 # 统一挂载各模块路由；prefix 与 API接口规范.md 的 /api/v1 一致
-for r in (projects, database, chapter, discussion, model, memory, foreshadow, direction, template, references):
+for r in (
+    projects, database, chapter, discussion, model, memory,
+    foreshadow, direction, template, references,
+    setting, custom_skill, workflow,                 # 本轮新增的三大全局模块
+    volume, article,                                 # 4 级结构：卷 / 篇
+    reference_global,                                 # 全局参考资料池
+    assist,                                           # AI 辅助能力总入口
+):
     app.include_router(r.router, prefix="/api/v1")
 
 
@@ -45,6 +63,23 @@ for r in (projects, database, chapter, discussion, model, memory, foreshadow, di
 @app.on_event("startup")
 def _startup():
     init_db()
+    # 预置 6 条写作 SKILL（幂等：已存在同名则跳过）。
+    # 开箱即用比让作者对着空列表发呆强，不满意可以在「写作技能」里改或禁用。
+    try:
+        from app.core import database as _db_mod
+        from app.services import seed_skills
+
+        # SessionLocal 是 get_engine() 里才赋值的模块级变量，
+        # 必须走属性访问，不能在 import 时就绑定（那时还是 None）
+        db = _db_mod.SessionLocal()
+        try:
+            r = seed_skills.install(db)
+            if r.get("created"):
+                print(f"[startup] 已安装预置写作 SKILL: {r['created']}")
+        finally:
+            db.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[startup] 预置 SKILL 安装跳过: {type(e).__name__}: {e}")
 
 
 @app.get("/api/v1/health", tags=["系统"])

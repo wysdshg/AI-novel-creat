@@ -23,9 +23,8 @@ def _to_dict(orm: ProjectORM, chapter_count: int = 0) -> dict:
         "summary": orm.summary,
         "status": orm.status,
         "db_backend": orm.db_backend,
-        "created_at": orm.created_at,
-        "updated_at": orm.updated_at,
         "chapter_count": chapter_count,
+        "setting_ids": orm.setting_ids,
     }
 
 
@@ -43,6 +42,7 @@ def create_project(db: Session, data: dict) -> dict:
         summary=data.get("summary"),
         status=data.get("status", "draft"),
         db_backend=data.get("db_backend", "sqlite"),
+        setting_ids=data.get("setting_ids"),
     )
     db.add(orm)
     db.commit()

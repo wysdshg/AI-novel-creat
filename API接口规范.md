@@ -1,9 +1,9 @@
 # 网页小说智能体 — API 接口规范（接口要求文档）
 
-> 版本：**v0.2（部分模块已落地真实持久化，其余仍为接口桩）**
+> 版本：**v0.3（本轮：新增 §12 设定库 / §13 写作 SKILL / §14 工作流，§2.2 技能升为真实）**
 > 适用范围：B/S 架构小说创作专属智能体。对应顶层五层架构中的「指令解析引擎 / 核心调度引擎 / 多模型 API 网关 / 持久化数据库层」对外暴露部分。
 > 读者：前端开发者、后端开发者、接入第三方模型厂商的开发者。
-> 最后更新：2026-08-06
+> 最后更新：2026-08-08
 
 ---
 
@@ -19,19 +19,23 @@
 | --- | --- | --- |
 | §1 | 作品 Project | ✅ 真实（列表分页） |
 | §2.1 | 角色 Characters | ✅ 真实（11 字段） |
-| §2.2 | 技能 Skills | ⚠️ 桩 |
-| §2.3 | 关系 Relations | ⚠️ 桩 |
+| §2.2 | 技能 Skills | ✅ 真实（本轮升，原为 ⚠️桩） |
+| §2.3 | 关系 Relations | ✅ 真实 |
 | §2.4 | 势力 Factions | ✅ 真实 |
 | §2.4b | 地点 Locations | ✅ 真实（含 geometry/plane + geo-relations） |
 | §2.6 | 设定校验 validate | ⚠️ 桩 |
 | §2.7 | 指令入库 command | ⚠️ 桩 |
-| §3.1 | 剧情商讨 Discussion | ⚠️ 桩（内存态） |
+| §3.1 | 剧情商讨 Discussion | ✅ 真实（持久化） |
 | §3.2 | 章节生成 Chapter | ⚠️ 桩（非流式，SSE 未实现） |
 | §4 | 模型网关 Model | ✅ 真实 |
 | §5 | 记忆压缩 Memory | ⚠️ 桩 |
 | §6 | 伏笔 Foreshadow | ⚠️ 桩 |
 | §7 | 走向推荐 Direction | ⚠️ 桩 |
 | §8 | 套路模板 Template | ⚠️ 桩 |
+| §11 | 参考文档 Reference Doc | ✅ 真实 |
+| §12 | 设定库 Setting | ✅ 真实（本轮新增） |
+| §13 | 写作 SKILL CustomSkill | ✅ 真实（本轮新增） |
+| §14 | 工作流 Workflow | ✅ 真实（本轮新增） |
 
 ### 0.2 列表返回格式差异（已知不一致）
 
@@ -177,17 +181,19 @@
 
 **角色 Schema**：`id, name, appearance(外貌), personality(性格), background(身世背景), talent(天赋), experience(过往经历), status(当前状态), skill_ids[](绑定技能ID), faction_id(关联势力), tags[](标签), created_at, updated_at`
 
-### 2.2 技能表（Skills）
+### 2.2 技能表（Skills）[✅真实 — 本轮升级，原为占位]
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| POST | `/skills` | 新增 |
-| GET | `/skills` | 列表 |
-| GET | `/skills/{skill_id}` | 详情 |
-| PUT | `/skills/{skill_id}` | 修改 |
-| DELETE | `/skills/{skill_id}` | 删除（级联解除角色绑定） |
+| POST | `/projects/{project_id}/skills` | 新增 |
+| GET | `/projects/{project_id}/skills` | 列表 |
+| GET | `/projects/{project_id}/skills/{skill_id}` | 详情 |
+| PUT | `/projects/{project_id}/skills/{skill_id}` | 修改 |
+| DELETE | `/projects/{project_id}/skills/{skill_id}` | 删除（级联解除角色绑定） |
 
-**技能 Schema**：`id, name, level, effect(效果), limitation(使用限制), owner_id(持有者角色ID), side_effect(副作用), unlock_condition(解锁条件)`
+**技能 Schema**：`id, project_id, name, level, effect(效果), limitation(使用限制), owner_id(持有者角色ID), side_effect(副作用), unlock_condition(解锁条件)`
+
+> 本轮（§13）另新增**全局写作 SKILL** `/global-skills`，与本表「角色技能」并存但语义不同（前者是 AI 提示词模板）。
 
 ### 2.3 关系网表（Relations）
 
@@ -526,7 +532,7 @@ class BaseModelAdapter:
 
 1. 后端：在 `backend/app/routers/` 新建 `xxx.py`，用 `APIRouter` 定义端点，在 `main.py` 注册 `app.include_router(xxx, prefix="/api/v1")`，Schema 放 `schemas/`，业务桩放 `services/`；
 2. 前端：在 `frontend/src/api/` 新建 `xxx.js` 调用桩，`frontend/src/views/` 新建页面桩，`frontend/src/router/index.js` 追加路由；
-3. 文档：在本文件追加对应 § 章节。
+3. 文档：在本文件追加对应 § 章节，并在 [`../docs/接口与组件文档.md`](../docs/接口与组件文档.md) 留一份组件清单。
 
 ### 10.2 新增一个模型厂商
 
@@ -540,12 +546,158 @@ class BaseModelAdapter:
 
 ---
 
-## 11. 待定 / 后续补全（非脚手架阻断项）
+## 11. 参考文档（需求 8，按 project 隔离）[✅真实]
+
+每本小说可手动上传参考素材（大纲、设定笔记、同人资料、背景资料等），AI 生成章节时会自动读取。
+
+> 这里叫「参考文档」（参考图 1 的「参考资料」按钮指向同一组端点）。
+
+### 11.1 端点
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/projects/{project_id}/references` | 上传参考文档（filename / content_text） |
+| GET | `/projects/{project_id}/references` | 列表（不含正文，仅摘要） |
+| GET | `/projects/{project_id}/references/{doc_id}` | 详情（含正文） |
+| DELETE | `/projects/{project_id}/references/{doc_id}` | 删除 |
+
+支持格式：`.txt / .md / .json / .csv / .log` 等文本。PDF / Word 等二进制解析后续扩展。单文档正文硬上限 200K 字符。
+
+---
+
+## 12. 全局设定库（需求 12，跨小说复用）[✅真实]
+
+> 全局共享：与作品无关，多本小说可复用同一套设定（创建小说时让用户挑选）。
+> 类别约定：`境界 / 货币 / 体系 / 规则 / 其它`。
+
+### 12.1 端点
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/settings` | 列表（支持 `?category=&keyword=&template_only=`） |
+| POST | `/settings` | 新建 |
+| GET | `/settings/{setting_id}` | 详情 |
+| PUT | `/settings/{setting_id}` | 修改（全字段可空） |
+| DELETE | `/settings/{setting_id}` | 删除 |
+
+### 12.2 Schema
+
+```json
+{
+  "id": "uuid", "name": "玄幻九境界", "category": "境界",
+  "levels": ["炼气","筑基","金丹",...],
+  "description": "...", "tags": ["玄幻","高武"],
+  "is_template": true,
+  "created_at": "ISO", "updated_at": "ISO"
+}
+```
+
+### 12.3 生成时拼接
+
+与 §11 类似：章节生成（§3.2）触发时，`{project_id}` 命中的设定若标 `is_template=true`，将 `levels + description` 序列化为文本片段拼入 Prompt。
+
+> 可扩展点：`settings.teach_cache_by_template(project_id)` —— 缓存高频模板减少 IO（TODO）。
+
+---
+
+## 13. 全局写作 SKILL（需求 13，跨小说复用）[✅真实]
+
+> 全局共享：与作品无关。**与资料库的 Skill（§2.2）语义不同**：本节 SKILL 是「AI 提示词模板」，按 `trigger`（discussion / chapter / memory / parse / all）注入对应阶段 Prompt。
+
+### 13.1 端点
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/global-skills` | 列表（支持 `?trigger=&enabled_only=&keyword=`） |
+| POST | `/global-skills` | 新建 |
+| GET | `/global-skills/{skill_id}` | 详情 |
+| PUT | `/global-skills/{skill_id}` | 修改 |
+| DELETE | `/global-skills/{skill_id}` | 删除 |
+
+### 13.2 Schema
+
+```json
+{
+  "id": "uuid", "name": "古风用词器",
+  "description": "生成时优先用四字成语替代口语",
+  "prompt_body": "...（注入到 AI 提示词的完整正文）",
+  "trigger": "chapter",     // discussion | chapter | memory | parse | all
+  "enabled": true,
+  "tags": ["古风"],
+  "created_at": "ISO", "updated_at": "ISO"
+}
+```
+
+### 13.3 调用约定
+
+- `trigger=chapter` 在 §3.2 章节生成时按需注入；
+- `trigger=all` 在所有阶段都注入；
+- 多个 SKILL 命中同一 trigger 时，按 `name` 字典序拼接（避免顺序漂移导致缓存无效）。
+
+> 可扩展点：`priority` 字段（数值大者先生效）；`cooldown`（防止注入过度）。
+
+---
+
+## 14. 工作流（需求 14，跨小说复用）[✅真实]
+
+> 全局共享：可重用的剧情 / 创作流程模板（DAG：节点 + 条件边）。
+> 本轮仅做 CRUD + JSON 编辑；可视化拖拽（vue-flow 接入）后续扩展。
+
+### 14.1 端点
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/workflows` | 列表（`?active_only=&keyword=`） |
+| POST | `/workflows` | 新建（节点 / 边 JSON 自动校验 DAG 端点） |
+| GET | `/workflows/{wf_id}` | 详情 |
+| PUT | `/workflows/{wf_id}` | 修改 |
+| DELETE | `/workflows/{wf_id}` | 删除 |
+| POST | `/workflows/{wf_id}/duplicate` | 复制（id 重生，name 加「(副本)」） |
+
+### 14.2 Schema
+
+```json
+{
+  "id": "uuid", "name": "开篇套路",
+  "description": "钩子 → 冲突引入 → 第一波冲突",
+  "nodes": [
+    {"id":"start","type":"start","label":"开篇", "params":{}, "position":{"x":0,"y":0}},
+    {"id":"hook","type":"step",  "label":"钩子"}
+  ],
+  "edges": [
+    {"from":"start","to":"hook","condition":"always"}
+  ],
+  "tags": ["开篇"],
+  "is_active": true,
+  "created_at": "ISO", "updated_at": "ISO"
+}
+```
+
+`FlowEdge.condition ∈ {always, onSuccess, onFailure}`，自定义字符串也允许（向后兼容）。
+
+### 14.3 运行时（TODO）
+
+后续接「工作流执行」时，根据 `edges.condition` 调度 §4 模型网关：
+
+```
+工作流开始 → 调用 gateway 串行/分支执行 node × params → 收集产物 → 触发依赖节点
+```
+
+> 可扩展点：
+> - `version` 字段：工作流派生版本管理
+> - `execution_history`：运行时记录（按章节关联）
+> - DAG 编辑器：vue-flow 双向绑定
+
+---
+
+## 15. 待定 / 后续补全（非脚手架阻断项）
 
 - 鉴权与多租户（§0.3）；
 - 文件/图片类资源上传（封面、关系图谱导出）；
 - WebSocket 与 SSE 二选一的正式确定（当前默认 SSE）；
 - 限流策略具体参数（QPS、并发）；
-- 审计日志表结构细化。
+- 审计日志表结构细化；
+- 工作流执行引擎（§14.3 TODO）；
+- SKILL `priority / cooldown`（§13.3 扩展点）。
 
 > 本文档随开发推进持续修订，版本号递增。任何偏离本规范的设计须先更新本文档再编码。

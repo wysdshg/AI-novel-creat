@@ -47,6 +47,7 @@ class ModelConfigUpdate(BaseModel):
     role: Optional[ROLES] = None
     is_backup: Optional[bool] = None
     status: Optional[str] = None
+    is_default: Optional[bool] = None
     enable_thinking: Optional[bool] = None
 
 

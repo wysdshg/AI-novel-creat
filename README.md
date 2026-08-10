@@ -1,14 +1,17 @@
 # 网页小说创作智能体 — 项目接力说明（README）
 
 > 面向**下一任开发者 / Agent** 的上手与交接文档。读完本文件可在 5 分钟内接手。
-> 配套文档：`API接口规范.md`（接口契约，已标注真实/桩状态）、`PROJECT_REQUIREMENTS.md`（11 项需求落点）、`.workbuddy/memory/2026-08-07.md`（本会话详细改动史，含踩坑记录）。
-> 最后更新：2026-08-07
+> 配套文档：`API接口规范.md`（接口契约）、`PROJECT_REQUIREMENTS.md`（11 项需求落点）、`docs/架构设计-上下文与记忆引擎.md`（上下文引擎/记忆层/去AI味/SKILL调度/接线五大模块）、`.workbuddy/memory/2026-08-08.md`（本会话详细改动史）。
+> 最后更新：2026-08-08
 
 ---
 
 ## 1. 这是什么
 
-一个 B/S 架构的小说创作专属智能体。当前已搭好**前端界面 + 后端 REST 服务 + SQLite 持久化**，并已落地**核心创作闭环**：资料库（角色/势力/地点/参考文档/作品/关系网）、模型网关真实调用（Ollama 原生 + OpenAI 兼容多厂商 + Claude）、章节流式生成、剧情商讨对话、配置对话自然语言自动入库、世界地图与关系网可视化。**仍处桩状态的模块**：设定校验、走向推荐、记忆压缩、伏笔自动化、套路模板、技能库、章节列表查询。
+一个 B/S 架构的小说创作专属智能体。当前已搭好**前端界面 + 后端 REST 服务 + SQLite 持久化**，并已落地**核心创作闭环**：资料库（角色/势力/地点/参考文档/作品/关系网）、模型网关真实调用（Ollama 原生 + OpenAI 兼容多厂商 + Claude）、章节流式生成、剧情商讨对话、配置对话自然语言自动入库、世界地图与关系网可视化。
+
+**2026-08-08 落地五大基础模块**（详见 `docs/架构设计-上下文与记忆引擎.md`）：上下文引擎（让 AI 知道该生成什么）、记忆层（章后写后摄取 + 阶段压缩 + 走向卡片）、去 AI 味（前置注入 + 后置纯正则检测）、SKILL 调度（互斥/叠加 + priority 压轴）、全链路接线（生成/商讨走上下文引擎，前端三处最小改动透明化）。
+**仍处桩状态的模块**：设定校验、套路模板。
 
 核心交互：对话-centric 布局（底部聊天框，支持 `@角色` `@势力` 快捷输入），顶部标签切换「对话 / 概览 / 角色库 / 势力库 / 地点库 / 伏笔 / 参考文档 / 模型配置」等模块。
 
@@ -64,22 +67,22 @@ E:\AI小说创作\
 | 角色库 | `routers/database.py` (characters) | ✅ | 11 字段完整 CRUD |
 | 势力库 | `routers/database.py` (factions) | ✅ | 完整 CRUD |
 | 地点库 | `routers/database.py` (locations) | ✅ | 含 plane/坐标/形状/高度字段 + `geo-relations` 推导方位距离接口 |
-| 技能 | `routers/database.py` (skills) | ⚠️ | 占位返回 mock（未落地） |
+| 技能库 | `routers/custom_skill.py` + `services/skill_dispatch.py` + `seed_skills.py` | ✅ | 真实 CRUD + 互斥/叠加调度（priority 压轴）+ 6 条预置 SKILL（startup 幂等安装） |
 | 关系网 | `routers/database.py` (relations) + `relation_crud.py` | ✅ | 真实 CRUD + 前端关系网可视化 |
 | 设定校验 | `routers/database.py` (validate) | ⚠️ | 占位（`stubs.validate_settings`） |
 | 配置对话/指令入库 | `routers/database.py` (command) + `config_command.py` | ✅ | 自然语言抽取角色/势力/地点/关系并 upsert 落库（真实 LLM） |
 | 章节生成 | `routers/chapter.py` + `ollama_native` 适配器 | ✅ | SSE 流式 + 消费默认模型真实产出；提示词已收紧（禁英文/思考泄漏） |
 | 剧情商讨（对话） | `routers/discussion.py` `/discussion/chat` | ✅ | 流式回复真实（提示词已收紧）；商讨缓存已持久化（GET 返回历史、chat 自动落库、clear/archive 真实） |
-| 走向推荐 | `routers/direction.py` | ⚠️ | 占位（`stubs.recommend_directions`） |
+| 走向推荐 | 写后摄取 `services/ingestion.py` + `routers/assist.py` | ✅ | 每章生成后推 3 条走向卡片到对话区（可点击续写）；`recommend_global_references` 从全局池荐资料 |
 | 模型网关 | `routers/model.py` + `core/gateway` | ✅ | 真实适配器：OpenAI 兼容多厂商(openai/deepseek/qwen/kimi/ernie/spark/siliconflow/zhipu…) + Ollama 原生 `/api/chat` + Claude；支持思考模式开关 |
 | 套路模板 | `routers/template.py` | ⚠️ | 占位（`stubs.list_templates` / `generate_outline`） |
-| 伏笔 | `routers/foreshadow.py` | ⚠️ | 占位（创建返回 `fs_placeholder`，detect/active 均桩） |
-| 记忆压缩 | `routers/memory.py` | ⚠️ | 占位（`stubs.compress_memory`） |
-| 章节列表查询 | `routers/chapter.py` `list_chapters` | ⚠️ | 回退 `stubs.list_chapters`（chapters 表读取未接） |
+| 伏笔 | 上下文引擎 `layer_foreshadow` + 写后摄取 | 🟡 | 上下文集成已真：已落库伏笔可按 `trigger_foreshadow_ids` 注入生成；写后摄取抽取 `foreshadow_actions` 回注。CRUD 路由 `foreshadow.py` 仍桩 |
+| 记忆层 / 记忆压缩 | `routers/memory.py` + `services/{memory_crud,ingestion}.py` | ✅ | 章级记忆双表 + 写后摄取 + 阶段压缩（够章数自动触发）+ 全书大事记 + 待确认实体人工回路 |
+| 章节列表查询 | `routers/chapter.py` `list_chapters` | ✅ | 真实读取 `chapters` 表（4 级结构按 article 过滤） |
 
 > 图例：✅ = 真实可用 ｜ ⚠️ = 接口桩（占位/mock） ｜ 🟡 = 部分实现（如对话：流式回复真实，但缓存持久化仍桩）。
 
-**前端对应**：ChatView、DatabaseView、FactionView、LocationView、ReferenceView、CharacterRelationView、WorldMapView、ConfigChatView 均为真实可用；DirectionView / ForeshadowView / TemplateView 为占位 UI（后端喂桩数据）。
+**前端对应**：ChatView、DatabaseView、FactionView、LocationView、ReferenceView、CharacterRelationView、WorldMapView、ConfigChatView 均为真实可用；DirectionView / ForeshadowView / TemplateView 为占位 UI（后端喂桩数据）。2026-08-08 新增：`ChatPanel.vue` 渲染章后走向卡片（可点击续写）、`GenerateChapterDialog.vue` 加「本次读取 / AI味检测 / 摄取进度」三块透明化面板、`api/assist.js` 封装 AI 辅助端点。
 
 ---
 
@@ -109,10 +112,7 @@ cd E:/AI小说创作/frontend
 npm install            # 首次
 npm run dev            # http://localhost:5173 ，/api 代理到 8000
 ```
-- ⚠️ **构建坑**：默认 `npm run build` 会清空 `dist/` 并被安全钩子拦截。验证编译请用：
-  ```bash
-  npm run build -- --outDir dist-test --emptyOutDir false
-  ```
+- ✅ **构建坑已根治**：本沙箱把 Node `rmSync` 劫持成不稳定的「安全删除」二进制，原会导致 Vite 清空 `dist/` 那步必崩。已在 `frontend/vite.config.js` 设 `build.emptyOutDir:false`，`npm run build` 现可直接跑通（产出 `dist/`）。部署到无此拦截的环境时可改回 `true`。
 - ✅ **已根治「store.xxx is not a function」HMR 坑**：`src/store/project.js` 已接入 `acceptHMRUpdate`，改 store 自动热替换，**无需重启 dev server**。
 
 ---
@@ -130,7 +130,7 @@ npm run dev            # http://localhost:5173 ，/api 代理到 8000
 
 | 现象 | 原因 | 解决 |
 | --- | --- | --- |
-| `npm run build` 被拦截 / 删文件 | 安全钩子禁止清 `dist/` | 用 `--outDir dist-test --emptyOutDir false` 验证编译 |
+| `npm run build` 被拦截 / 删文件 | 安全钩子劫持 `rmSync` 清 `dist/` | ✅ 已根治：`vite.config.js` 设 `emptyOutDir:false`，直接 `npm run build` |
 | `store.xxx is not a function` | Vite HMR 不重载 Pinia store | ✅ `store/project.js` 已接 `acceptHMRUpdate`，改 store 自动热替换 |
 | 改后端无反应（仍跑旧代码/坏状态） | 宿主 uvicorn reload 对共享盘不可靠 | ⚠️ 在宿主侧 `netstat -ano | findstr :8000` 查 PID → `taskkill /PID <PID> /F` → 重启 `python dev.py`（沙箱无法杀宿主进程） |
 | 新 ORM 列报 `no such column` | SQLite 不自动迁移 | ✅ `init_db` 启动时自动比对并 `ALTER TABLE ADD COLUMN` 补列 |
@@ -141,15 +141,12 @@ npm run dev            # http://localhost:5173 ，/api 代理到 8000
 
 ## 8. 接力开发建议（下一步做什么）
 
-核心闭环（资料库 + 模型网关 + 章节生成 + 对话 + 配置入库 + 世界地图/关系网可视化）**已完成并可运行**。剩余为二期/三期高级功能，均为接口桩，按投入产出比排序：
+核心闭环（资料库 + 模型网关 + 章节生成 + 对话 + 配置入库 + 世界地图/关系网可视化）**已完成并可运行**。2026-08-08 又落地了上下文引擎 / 记忆层 / 去 AI 味 / SKILL 调度 / 全链路接线（详见 `docs/架构设计-上下文与记忆引擎.md`）。剩余为二期/三期高级功能，均为接口桩，按投入产出比排序：
 
-1. **章节列表持久化（最实用）**：`routers/chapter.py` 的 `list_chapters` 仍是 `stubs.list_chapters` 桩——接 `chapters` 表，让生成历史可在前端查看/续写。（剧情商讨缓存已落库，无需再补）
-2. **伏笔自动化**：`foreshadow.py` 接 LLM 自动识别章节新增伏笔、触发检索；前端 `ForeshadowView` 已就绪。
-3. **走向推荐**：`direction.py` 读取结尾/人物状态/未触发伏笔 → LLM 推演 3~5 条（温度 0.7）。
-4. **记忆压缩**：`memory.py` 对章节做结构化压缩，支持长篇小说上下文收敛。
-5. **套路模板 / 大纲**：`template.py` 内置模板库 + 基于模板+历史摘要拆分大纲。
-6. **设定强制校验**：`validate_settings` 生成前校验设定一致性。
-7. **技能库**：`skills` 路由仍是占位，做成与角色库同款真实 CRUD。
+1. **设定强制校验**：`validate_settings` 生成前校验设定一致性（OOC 目前只靠 SKILL 软约束，未做硬校验）。
+2. **套路模板 / 大纲**：`template.py` 内置模板库 + 基于模板+历史摘要拆分大纲。
+3. **伏笔 CRUD 路由落地**：上下文集成已真（读取 + 写后抽取 + 生成触发），但 `routers/foreshadow.py` 的增删改查仍是桩，前端 `ForeshadowView` 已就绪。
+4. **云端强模型增强**：去 AI 味 `strict` 档（OOC 防护 + 替换表）、模型二次改写链路当前对 4B 关闭，换强模型后可开启。
 
 ---
 

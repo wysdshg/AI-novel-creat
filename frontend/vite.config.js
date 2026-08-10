@@ -16,5 +16,9 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    // 本沙箱（WorkBuddy）会把 Node 的 fs.rmSync 劫持成「安全删除」二进制，
+    // 该二进制不稳定地超时/失败，导致 Vite 清空 dist 这一步必崩。
+    // 关闭自动清空后构建可正常完成；部署到无此拦截的环境时可改回 true。
+    emptyOutDir: false,
   },
 })

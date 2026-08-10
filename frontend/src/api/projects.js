@@ -7,4 +7,7 @@ export const projectApi = {
   get: (id) => http.get(`/projects/${id}`),
   update: (id, data) => http.put(`/projects/${id}`, data),
   remove: (id) => http.delete(`/projects/${id}`),
+  // 小说设定库管理
+  getSettings: (id) => http.get(`/projects/${id}/settings`),
+  updateSettings: (id, settingIds) => http.put(`/projects/${id}/settings`, { setting_ids: settingIds }),
 }

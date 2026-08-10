@@ -1,0 +1,22 @@
+// 设定库 API 封装（全局共享） —— 后端 /api/v1/settings
+// CRUD 模式参照 src/api/database.js 的 crud() 工厂，保留 list/create/update/remove 命名。
+import http from './http'
+
+function buildSearch(params = {}) {
+  // 移除 undefined 以免发成 ?category=undefined
+  const out = {}
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== '') out[k] = v
+  }
+  return out
+}
+
+export const settingApi = {
+  list: (params = {}) => http.get('/settings', { params: buildSearch(params) }),
+  get: (id) => http.get(`/settings/${id}`),
+  create: (data) => http.post('/settings', data),
+  update: (id, data) => http.put(`/settings/${id}`, data),
+  remove: (id) => http.delete(`/settings/${id}`),
+  // 便捷方法：创建小说时挑选模板
+  templates: () => http.get('/settings', { params: { template_only: true } }),
+}

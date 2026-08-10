@@ -21,6 +21,9 @@ class ProjectORM(Base):
     status: Mapped[str] = mapped_column(String(20), default="draft")
     db_backend: Mapped[str] = mapped_column(String(20), default="sqlite")
     chapter_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 本小说选中的全局设定库 ID 列表（引用 SettingORM.id）
+    # 空列表 = 不注入任何设定；null/缺失 = 全量注入（向后兼容旧数据）
+    setting_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -76,9 +79,10 @@ class FactionORM(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     project_id: Mapped[str] = mapped_column(String(36), index=True)
     name: Mapped[str] = mapped_column(String(80))
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)      # 相关描述
     leader_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    members: Mapped[list] = mapped_column(JSON, default=list)
+    members: Mapped[list] = mapped_column(JSON, default=list)                # 核心成员（名称或角色ID）
+    territory: Mapped[str | None] = mapped_column(String(200), nullable=True)  # 势力范围
     status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -128,6 +132,7 @@ class ChapterORM(Base):
     __tablename__ = "chapters"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     project_id: Mapped[str] = mapped_column(String(36), index=True)
+    article_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # 隶属篇（article）；迁移期可空
     chapter_no: Mapped[int] = mapped_column(Integer)
     title: Mapped[str | None] = mapped_column(String(120), nullable=True)
     content: Mapped[str] = mapped_column(Text, default="")
@@ -137,10 +142,42 @@ class ChapterORM(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class VolumeORM(Base):
+    """卷：小说 / 卷 / 篇 / 章 4 级结构中的第 2 级。
+    每卷归属于一个 project；其下挂多「篇(article)」。
+    sort_order 用于侧栏树的展示顺序（升序）。
+    """
+    __tablename__ = "volumes"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    name: Mapped[str] = mapped_column(String(120))                  # 例如「第一卷 山野游侠」
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)  # AI 生成的卷概览
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ArticleORM(Base):
+    """篇：4 级结构中的第 3 级，隶属卷；其下挂多「章(chapter)」。
+    summary 是 AI 生成的篇概览；一个篇共享一个「篇章参考文档」（第 3 批落地）。
+    """
+    __tablename__ = "articles"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    volume_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)  # 冗余，便于整本查询
+    name: Mapped[str] = mapped_column(String(120))                  # 例如「第一篇 踏入仙途」
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)  # AI 生成的篇概览
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class DiscussionMessageORM(Base):
     __tablename__ = "discussion_messages"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     project_id: Mapped[str] = mapped_column(String(36), index=True)
+    chapter_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # 非空=章级商讨线程
+    conversation_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # 非空=会话级独立线程
     role: Mapped[str] = mapped_column(String(10))            # user / assistant
     content: Mapped[str] = mapped_column(Text)
     # ---- 商讨缓存持久化增强字段 ----
@@ -201,9 +238,168 @@ class ReferenceDocORM(Base):
     __tablename__ = "reference_docs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     project_id: Mapped[str] = mapped_column(String(36), index=True)
+    article_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # 非空=篇章参考文档（按篇维度）
     filename: Mapped[str] = mapped_column(String(200))
     content_type: Mapped[str] = mapped_column(String(60), default="text/plain")
     size: Mapped[int] = mapped_column(Integer, default=0)            # 字节数
     content_text: Mapped[str] = mapped_column(Text, default="")      # 文本正文
+    # ---- 相关性筛选支撑列（需求 2）----
+    # summary：文档要旨（上传时截断生成，或由 AI 摘要）。命中打分与「其余一行」注入都用它。
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # tags：检索关键词，命中权重最高
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    # source：upload=用户上传 / global=从全局池导入 / auto=系统写入（篇章参考）
+    source: Mapped[str] = mapped_column(String(20), default="upload")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ============================================================================
+# 本轮（用户大任务 1）新增的 3 个 ORM：设定库 / SKILL / 工作流
+# ----------------------------------------------------------------------------
+# 设定库（SettingORM）与 SKILL（CustomSkillORM）按设计是「全局共享」资源：
+# 创建小说时可以让用户挑选其中一套作为世界观/写作助手，不与具体 project 绑定。
+# 工作流（WorkflowORM）也是全局共享：描写特定类型剧情的固定流程模板，跨作品复用。
+# 注意：数据库的"技能"是 SkillORM（绑定角色，按 project 隔离），
+#       此处 CustomSkillORM 是用户自定义的"写作 SKILL"提示词模板（全局），两者独立。
+# ============================================================================
+
+class SettingORM(Base):
+    """全局共享的世界观/设定库（境界修为、货币系统、势力模板、规则等）。
+
+    全局共享：不带 project_id，多本小说可复用同一套设定。
+    数据按 category 分桶：境界 / 货币 / 体系 / 规则 / 其它。
+    列表返回（不分页）；创建后由 settings_list_cache() 缓存热门场景。
+    """
+    __tablename__ = "settings"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))              # 设定名，例如「玄幻九境界」「灵石货币」
+    category: Mapped[str] = mapped_column(String(30), index=True, default="其它")
+    # levels/grades 为可选 JSON 数组，例如 ["炼气","筑基","金丹",...] 或 [{k,v}]
+    levels: Mapped[list] = mapped_column(JSON, default=list)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tags: Mapped[list] = mapped_column(JSON, default=list)        # 检索用关键词
+    is_template: Mapped[bool] = mapped_column(Boolean, default=False)  # 是否为可被选用的模板
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class CustomSkillORM(Base):
+    """自定义写作 SKILL（用户为 AI 增加的提示词/技能模板，全局共享）。
+
+    与资料库的 SkillORM（按 project 隔离的「角色技能」）独立。
+    enabled：开关默认 true；trigger 描述 AI 在何场景调用（剧情商讨/章节生成/记忆压缩…）。
+    """
+    __tablename__ = "custom_skills"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(80))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 提示词主体（可空）；空表示只作为"标签"存在，不注入
+    prompt_body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trigger: Mapped[str | None] = mapped_column(String(120), nullable=True)  # discussion | chapter | memory | parse | all
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    # ---- 调度控制（防止多个 SKILL 相互打架）----
+    # category：同一分类内互斥，只有 priority 最高的一个生效；跨分类可叠加。
+    #   风格 / 结构 / 禁忌 / 口吻 / 通用
+    category: Mapped[str] = mapped_column(String(30), default="通用", index=True)
+    # priority：数值越大越优先。互斥时取最大者；拼接时按升序排（高优先级更贴近指令末尾）。
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    # builtin：系统预置的 SKILL（可禁用、可改，但删除时给出提示）
+    builtin: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class WorkflowORM(Base):
+    """工作流：可重用的剧情/创作流程模板（节点+边结构，全局共享）。
+
+    nodes/edges 均为 JSON：
+        nodes: [{id, type, label, params: {...}, position: {x,y}}]
+        edges: [{from, to, condition?: 'always'|'onSuccess'|'onFailure'}]
+    设计上参考简易 DAG 流程图，前端用 vue-flow/原生 SVG 可视化编辑；本轮仅 CRUD 化。
+    """
+    __tablename__ = "workflows"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    nodes: Mapped[list] = mapped_column(JSON, default=list)
+    edges: Mapped[list] = mapped_column(JSON, default=list)
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+# ============================================================================
+# 分层记忆体系（需求 3、4 的地基）
+# ----------------------------------------------------------------------------
+# 长篇小说写到几十章后必然超出任何模型的上下文窗口，业界通行解法是分层压缩：
+#   L1 世界观      → settings / projects.summary（已有表）
+#   L2 角色卡      → characters（已有表）
+#   L3 阶段摘要    → StageSummaryORM（本次新增，每 N 章滚动压缩一次）
+#   L4 最近章记忆  → ChapterMemoryORM（本次新增，每章一条结构化记忆）
+#   L5 上一章结尾  → chapters.content 尾部原文（读表即可，不另存）
+# 原先项目里 L3/L4 完全没有落点，"记忆"只有一个会被覆盖冲掉的篇章参考文档。
+# ============================================================================
+
+class ChapterMemoryORM(Base):
+    """章级结构化记忆：每生成完一章，由写后摄取自动抽取并落库。
+
+    这张表是「AI 记得住前文」的核心。注入下一章时读它，而不是读几万字原文。
+    next_directions 同时服务需求 4——章后走向建议推送到对话区。
+    """
+    __tablename__ = "chapter_memories"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    chapter_id: Mapped[str] = mapped_column(String(36), index=True)
+    article_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    chapter_no: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    title: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    summary: Mapped[str] = mapped_column(Text, default="")              # 本章 150~250 字摘要
+    ending_hook: Mapped[str | None] = mapped_column(Text, nullable=True)  # 结尾悬念/钩子（下一章开头要接住）
+    characters: Mapped[list] = mapped_column(JSON, default=list)        # 出场角色名
+    locations: Mapped[list] = mapped_column(JSON, default=list)         # 出场地点名
+    plot_points: Mapped[list] = mapped_column(JSON, default=list)       # 关键事件 3~5 条
+    foreshadow_actions: Mapped[list] = mapped_column(JSON, default=list)  # [{action: bury|hint|resolve, desc}]
+    next_directions: Mapped[list] = mapped_column(JSON, default=list)   # [{title, detail, tension}] 需求 4
+    new_entities: Mapped[list] = mapped_column(JSON, default=list)      # [{kind: character|faction|location, name, brief}] 待确认入库
+    # pending=已摄取待用户确认实体入库；confirmed=已确认；skipped=用户忽略
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    raw: Mapped[str | None] = mapped_column(Text, nullable=True)        # 模型原始输出，解析失败时排查用
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class StageSummaryORM(Base):
+    """阶段滚动摘要（L3）：把连续 N 章的章级记忆再压一层。
+
+    scope=article/volume/range，覆盖 [from_chapter_no, to_chapter_no]。
+    写到第 50 章时注入的是若干条阶段摘要 + 最近几章的章级记忆，
+    而不是 50 条章级记忆，避免上下文线性膨胀。
+    """
+    __tablename__ = "stage_summaries"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    scope: Mapped[str] = mapped_column(String(20), default="range")     # range | article | volume
+    scope_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    from_chapter_no: Mapped[int] = mapped_column(Integer, default=0)
+    to_chapter_no: Mapped[int] = mapped_column(Integer, default=0)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    key_events: Mapped[list] = mapped_column(JSON, default=list)
+    open_threads: Mapped[list] = mapped_column(JSON, default=list)      # 尚未收束的线索
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class AppConfigORM(Base):
+    """全局键值配置：上下文预算档位、写库模式开关、去 AI 味开关等。
+
+    用 KV 表而不是给每个开关加一列——开关会一直加，加列要改 ORM 又要迁移。
+    value 统一存 JSON，读的时候按 key 约定的形状取。
+    """
+    __tablename__ = "app_configs"
+    key: Mapped[str] = mapped_column(String(60), primary_key=True)
+    value: Mapped[dict | list | str | int | float | bool | None] = mapped_column(JSON, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -23,11 +23,21 @@ def add_message(
     content: str,
     thinking: Optional[str] = None,
     meta: Optional[dict] = None,
+    chapter_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
 ) -> DiscussionMessageORM:
-    """追加一条商讨消息（role: user / assistant）。"""
+    """追加一条商讨消息（role: user / assistant）。
+
+    线程归属（互斥，优先级从高到低）：
+    - conversation_id 非空 → 该消息属于某个「会话」线程（独立记忆）。
+    - 否则 chapter_id 非空 → 属于某个「章」的线程。
+    - 否则 → 小说级默认线程（chapter_id IS NULL 且 conversation_id IS NULL）。
+    """
     o = DiscussionMessageORM(
         id=uuid.uuid4().hex,
         project_id=project_id,
+        chapter_id=chapter_id,
+        conversation_id=conversation_id,
         role=role,
         content=content,
         thinking=thinking,
@@ -41,9 +51,30 @@ def add_message(
     return o
 
 
-def list_messages(db: Session, project_id: str, include_archived: bool = False) -> list:
-    """返回商讨消息，按时间升序。默认只返回「当前缓存」（未归档）。"""
+def list_messages(
+    db: Session,
+    project_id: str,
+    chapter_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+    include_archived: bool = False,
+) -> list:
+    """返回商讨消息，按时间升序。默认只返回「当前缓存」（未归档）。
+
+    线程优先级：conversation_id > chapter_id > 小说级默认线程。
+    - conversation_id 给定 → 返回该会话线程。
+    - 否则 chapter_id 给定 → 返回该章线程。
+    - 否则 → 返回小说级默认线程（两者均为 NULL）。
+    """
     q = db.query(DiscussionMessageORM).filter_by(project_id=project_id)
+    if conversation_id is not None:
+        q = q.filter_by(conversation_id=conversation_id)
+    elif chapter_id is not None:
+        q = q.filter_by(chapter_id=chapter_id)
+    else:
+        q = q.filter(
+            DiscussionMessageORM.chapter_id.is_(None),
+            DiscussionMessageORM.conversation_id.is_(None),
+        )
     if not include_archived:
         q = q.filter(DiscussionMessageORM.archived_chapter_id.is_(None))
     return q.order_by(DiscussionMessageORM.created_at.asc()).all()
@@ -57,23 +88,46 @@ def count_current(db: Session, project_id: str) -> int:
     )
 
 
-def clear_messages(db: Session, project_id: str) -> int:
-    """清空「当前缓存」（仅未归档消息）。返回删除条数。"""
-    n = (
-        db.query(DiscussionMessageORM)
-        .filter_by(project_id=project_id, archived_chapter_id=None)
-        .delete()
-    )
+def clear_messages(
+    db: Session,
+    project_id: str,
+    chapter_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
+) -> int:
+    """清空「当前缓存」。
+
+    线程优先级同 list_messages：conversation_id > chapter_id > 小说级默认线程。
+    返回删除条数。
+    """
+    q = db.query(DiscussionMessageORM).filter_by(project_id=project_id)
+    if conversation_id is not None:
+        q = q.filter_by(conversation_id=conversation_id)
+    elif chapter_id is not None:
+        q = q.filter_by(chapter_id=chapter_id)
+    else:
+        q = q.filter(
+            DiscussionMessageORM.chapter_id.is_(None),
+            DiscussionMessageORM.conversation_id.is_(None),
+        )
+    q = q.filter(DiscussionMessageORM.archived_chapter_id.is_(None))
+    n = q.delete()
     db.commit()
     return n
 
 
-def archive_to_chapter(db: Session, project_id: str, chapter_id: str) -> dict:
-    """将当前商讨草稿追加为章节备注，并标记消息为已归档。
+def archive_to_chapter(
+    db: Session,
+    project_id: str,
+    chapter_id: str,
+    conversation_id: Optional[str] = None,
+) -> dict:
+    """将当前商讨草稿归档为指定章节备注，并标记消息为已归档。
 
+    源线程：conversation_id 给定则取该会话线程；否则取小说级默认线程
+    （chapter_id=None 且 conversation_id=None）。
     保留消息历史（仅从「当前缓存」移出），并在章节 note 中追加可读的商讨记录。
     """
-    msgs = list_messages(db, project_id, include_archived=False)
+    msgs = list_messages(db, project_id, chapter_id=None, conversation_id=conversation_id, include_archived=False)
     if not msgs:
         return {"archived_count": 0, "chapter_id": chapter_id}
 

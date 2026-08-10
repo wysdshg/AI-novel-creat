@@ -1,6 +1,6 @@
 """作品（项目）实体（对应 API接口规范.md §1）。"""
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 
 
@@ -13,6 +13,7 @@ class ProjectBase(BaseModel):
 
 class ProjectCreate(ProjectBase):
     db_backend: str = Field("sqlite", description="sqlite|mysql")
+    setting_ids: Optional[List[str]] = Field(None, description="选中的全局设定库 ID 列表")
 
 
 class ProjectUpdate(BaseModel):
@@ -20,6 +21,7 @@ class ProjectUpdate(BaseModel):
     genre: Optional[str] = None
     summary: Optional[str] = None
     status: Optional[str] = None
+    setting_ids: Optional[List[str]] = None
 
 
 class Project(ProjectBase):
@@ -28,3 +30,4 @@ class Project(ProjectBase):
     created_at: datetime
     updated_at: datetime
     chapter_count: int = 0
+    setting_ids: Optional[List[str]] = None

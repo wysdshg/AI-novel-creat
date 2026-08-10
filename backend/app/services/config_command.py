@@ -32,7 +32,7 @@ SYSTEM_PROMPT = """你是一名小说设定整理助手。用户会用自然语�
 {
   "reply": "用一句中文向用户说明你整理并写入了哪些设定",
   "characters": [
-    {"name":"必填","role_type":"主角/配角/反派/其他","gender":"男/女/其他","age":整数或null,"personality":"性格","background":"背景","talent":"天赋","current_level":"等级/境界","brief":"一句话简介"}
+    {"name":"必填","role_type":"主角/配角/反派/其他","gender":"男/女（仅填单个字）","age":整数或null,"personality":"性格描述","background":"背景描述","talent":"天赋","current_level":"等级/境界","skills":["技能1","技能2"],"relationship_network":["与XX的关系"],"brief":"一句话简介"}
   ],
   "factions": [
     {"name":"必填","description":"势力简介","status":"活跃/衰落/隐秘/其他"}
@@ -45,6 +45,13 @@ SYSTEM_PROMPT = """你是一名小说设定整理助手。用户会用自然语�
   ]
 }
 
+字段格式硬性规则（违反将导致数据错误）：
+- gender 只能是「男」或「女」或「其他」单个值，禁止塞入描述文字、身份、长句子。
+- role_type 只能是「主角」「配角」「反派」「其他」之一。
+- age 必须是整数数字（如 18、24），不能是文字。
+- personality / background / brief 才是放描述性文字的字段。
+- 若某字段无法从文本中推断，填 null，不要编造。
+
 规则：
 - 只抽取文本中明确出现或可由上下文可靠推断的实体，不要编造。
 - relations 里的 subject / object 必须是 characters 中出现过的角色姓名。
@@ -53,6 +60,7 @@ SYSTEM_PROMPT = """你是一名小说设定整理助手。用户会用自然语�
 
 _CHAR_FIELDS = ("role_type", "gender", "age", "personality", "background",
                 "talent", "current_level", "brief")
+_LIST_CHAR_FIELDS = ("skills", "relationship_network")
 _LIST_FIELDS = ("skills", "relationship_network", "notable_features", "members")
 
 
@@ -88,8 +96,44 @@ def _empty_changes():
     return {"characters": [], "factions": [], "locations": [], "relations": []}
 
 
-def run(db: Session, project_id: str, text: str, dry_run: bool = False):
-    default = model_crud.get_default(db)
+def _sanitize_characters(data: dict) -> None:
+    """纠正 LLM 常犯的字段值混淆错误（如把整段描述塞入 gender）。
+
+    对 data["characters"] 就地修改，不返回新对象。
+    """
+    _GENDER_VALUES = {"男", "女", "其他"}
+    _ROLE_TYPE_VALUES = {"主角", "配角", "反派", "其他"}
+
+    for c in (data.get("characters") or []):
+        # gender 超过 2 字符 → 模型塞了描述文字，清空让用户/brief 承担
+        g = (c.get("gender") or "").strip()
+        if g and g not in _GENDER_VALUES:
+            print(f"[config_command] gender 字段异常({g!r})，已清除")
+            c.pop("gender", None)
+
+        # role_type 不在白名单 → 清除
+        rt = (c.get("role_type") or "").strip()
+        if rt and rt not in _ROLE_TYPE_VALUES:
+            print(f"[config_command] role_type 字段异常({rt!r})，已清除")
+            c.pop("role_type", None)
+
+        # age 不是整数 → 尝试提取数字，失败则清除
+        a = c.get("age")
+        if a is not None:
+            try:
+                c["age"] =int(str(a).strip())
+            except (ValueError, TypeError):
+                print(f"[config_command] age 字段异常({a!r})，已清除")
+                c.pop("age", None)
+
+
+def run(db: Session, project_id: str, text: str, dry_run: bool = False,
+        model_id: str | None = None, entity_type: str | None = None):
+    # 优先用调用方指定的模型（如本地 Ollama）；否则回退默认模型
+    if model_id:
+        default = model_crud.get_model(db, model_id)
+    else:
+        default = model_crud.get_default(db)
     use_model = default is not None and (default.status or "active") == "active"
     if not use_model:
         return ok({
@@ -129,13 +173,50 @@ def run(db: Session, project_id: str, text: str, dry_run: bool = False):
             "model_ok": True,
         })
 
+    # 单次实体指令（添加角色/地点/势力）：只抽该类型，避免顺带脑补其他实体。
+    # /设定 或不指定类型时保持原行为（四类都抽）。
+    if entity_type in ("角色", "地点", "势力"):
+        for _k in ("characters", "factions", "locations", "relations"):
+            data.setdefault(_k, [])
+        if entity_type == "角色":
+            data["factions"] = data["locations"] = data["relations"] = []
+        elif entity_type == "地点":
+            data["characters"] = data["factions"] = data["relations"] = []
+        elif entity_type == "势力":
+            data["characters"] = data["locations"] = data["relations"] = []
+
+    # ── 字段值后处理安全网：纠正模型常犯的字段混淆错误 ──
+    _sanitize_characters(data)
+
     if dry_run:
-        # 预览：原样返回抽取结果，不落库
+        # 预览：保留 LLM 抽到的完整字段（供对话实体建议复用），不只 name
         preview = _empty_changes()
-        preview["characters"] = [{"name": c.get("name"), "action": "preview"} for c in (data.get("characters") or [])]
-        preview["factions"] = [{"name": c.get("name"), "action": "preview"} for c in (data.get("factions") or [])]
-        preview["locations"] = [{"name": c.get("name"), "action": "preview"} for c in (data.get("locations") or [])]
-        preview["relations"] = [{"subject": c.get("subject"), "object": c.get("object"), "action": "preview"} for c in (data.get("relations") or [])]
+        for c in (data.get("characters") or []):
+            entry = {"action": "preview", "name": c.get("name", "")}
+            # 透传 LLM 抽到的角色属性（personality/talent/skills/等）
+            for _f in ("role_type", "age", "gender", "personality", "background",
+                       "talent", "current_level", "skills", "relationship_network",
+                       "brief"):
+                if _f in c and c[_f] not in (None, ""):
+                    entry[_f] = c[_f]
+            preview["characters"].append(entry)
+        for f_item in (data.get("factions") or []):
+            entry = {"action": "preview", "name": f_item.get("name", "")}
+            for _f in ("description", "status", "territory"):
+                if _f in f_item and f_item[_f] not in (None, ""):
+                    entry[_f] = f_item[_f]
+            preview["factions"].append(entry)
+        for l_item in (data.get("locations") or []):
+            entry = {"action": "preview", "name": l_item.get("name", "")}
+            for _f in ("location_type", "region", "description"):
+                if _f in l_item and l_item[_f] not in (None, ""):
+                    entry[_f] = l_item[_f]
+            preview["locations"].append(entry)
+        preview["relations"] = [
+            {"subject": r.get("subject"), "object": r.get("object"),
+             "relation_type": r.get("relation_type"), "action": "preview"}
+            for r in (data.get("relations") or [])
+        ]
         return ok({
             "reply": data.get("reply", "（预览）以下设定将被写入资料库："),
             "changes": preview,

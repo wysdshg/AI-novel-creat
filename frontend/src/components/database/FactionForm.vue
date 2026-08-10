@@ -18,7 +18,11 @@
     </el-row>
 
     <el-form-item label="描述">
-      <el-input v-model="form.description" type="textarea" :rows="4" resize="none" placeholder="势力背景、目标、风格…" />
+      <el-input v-model="form.description" type="textarea" :rows="4" resize="none" placeholder="势力背景、目标、风格…（相关描述）" />
+    </el-form-item>
+
+    <el-form-item label="势力范围">
+      <el-input v-model="form.territory" placeholder="如：清溪县码头、北境十三州、东海群岛…" />
     </el-form-item>
 
     <el-form-item label="核心成员">

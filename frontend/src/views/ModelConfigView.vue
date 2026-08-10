@@ -302,6 +302,8 @@ async function testForm() {
     else ElMessage.warning(`连接失败：${res.msg}`)
   } catch (e) {
     ElMessage.closeAll()
+    if (!e?.response) ElMessage.error('连接测试失败：请求超时或网络不通')
+    /* 其它 HTTP 错误已由 http 拦截器提示 */
   }
 }
 

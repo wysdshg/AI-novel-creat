@@ -9,7 +9,11 @@ from app.schemas.database import (
 )
 from app.core.response import ok
 from app.core.database import get_session
-from app.services import character_crud, faction_crud, location_crud, relation_crud, stubs, config_command
+from app.services import (
+    character_crud, faction_crud, location_crud, relation_crud,
+    skill_crud,                              # 本轮升为真实持久化（替换原占位）
+    stubs, config_command,
+)
 
 router = APIRouter(tags=["资料库"])
 
@@ -60,29 +64,46 @@ def delete_character(project_id: str, character_id: str, db: Session = Depends(g
     return ok({"deleted": character_id})
 
 
-# ---------- 技能 ----------
+# ---------- 技能（§2.2，本轮升级为真实持久化） ----------
 @router.post("/projects/{project_id}/skills")
-def create_skill(project_id: str, body: SkillCreate):
-    return ok({"id": "sk_placeholder", **body.model_dump()})
+def create_skill(
+    project_id: str,
+    body: SkillCreate,
+    db: Session = Depends(get_session),
+):
+    return ok(skill_crud.create_skill(db, project_id, body).model_dump(mode="json"))
 
 
 @router.get("/projects/{project_id}/skills")
-def list_skills(project_id: str):
-    return ok([])
+def list_skills(project_id: str, db: Session = Depends(get_session)):
+    return ok([s.model_dump(mode="json") for s in skill_crud.list_skills(db, project_id)])
 
 
 @router.get("/projects/{project_id}/skills/{skill_id}")
-def get_skill(project_id: str, skill_id: str):
-    return ok({"id": skill_id})
+def get_skill(project_id: str, skill_id: str, db: Session = Depends(get_session)):
+    s = skill_crud.get_skill(db, project_id, skill_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="技能不存在")
+    return ok(s.model_dump(mode="json"))
 
 
 @router.put("/projects/{project_id}/skills/{skill_id}")
-def update_skill(project_id: str, skill_id: str, body: SkillUpdate):
-    return ok({"id": skill_id, **body.model_dump(exclude_unset=True)})
+def update_skill(
+    project_id: str,
+    skill_id: str,
+    body: SkillUpdate,
+    db: Session = Depends(get_session),
+):
+    s = skill_crud.update_skill(db, project_id, skill_id, body)
+    if s is None:
+        raise HTTPException(status_code=404, detail="技能不存在")
+    return ok(s.model_dump(mode="json"))
 
 
 @router.delete("/projects/{project_id}/skills/{skill_id}")
-def delete_skill(project_id: str, skill_id: str):
+def delete_skill(project_id: str, skill_id: str, db: Session = Depends(get_session)):
+    if not skill_crud.delete_skill(db, project_id, skill_id):
+        raise HTTPException(status_code=404, detail="技能不存在")
     return ok({"deleted": skill_id})
 
 
@@ -239,4 +260,4 @@ def validate_settings(project_id: str, body: ValidateRequest):
 # ---------- 配置对话：自然语言自动整理资料库（需求 10） ----------
 @router.post("/projects/{project_id}/command")
 def run_command(project_id: str, body: CommandRequest, db: Session = Depends(get_session)):
-    return config_command.run(db, project_id, body.text, body.dry_run)
+    return config_command.run(db, project_id, body.text, body.dry_run, entity_type=body.entity_type)
