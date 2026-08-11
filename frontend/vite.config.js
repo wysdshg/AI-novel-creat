@@ -11,7 +11,14 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': { target: 'http://localhost:8000', changeOrigin: true },
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        // 两阶段查询（Pass1 + 加载参考 + Pass2）常需 60~120s，
+        // http-proxy 默认 timeout 不够长会导致前端收到 "BodyStreamBuffer was aborted"。
+        timeout: 300000,   // 5 分钟（代理层）
+        proxyTimeout: 300000,  // socket 超时（兼容旧版 http-proxy）
+      },
     },
   },
   build: {
