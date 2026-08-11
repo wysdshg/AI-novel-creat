@@ -43,6 +43,10 @@ def _safe(fn, default=None):
 # 避免一条巨无霸设定常驻占窗口。
 _SETTING_BACKBONE = {"境界", "修炼"}
 
+# 设定分类排序：体系（官制）优先，确保小模型注意力先落在知识问答高频项。
+# 模块级共享：layer_world 与 build_setting_catalog 都用它。
+_CAT_ORDER = {"体系": 0, "境界": 1, "货币": 2, "规则": 3}
+
 
 def _relevance(text: str, query: str) -> float:
     """文本与查询的相关性（0~1），2-gram 重叠率。
@@ -140,7 +144,7 @@ def layer_world(db: Session, project_id: str, volume_id: str | None = None,
 
     # 全局设定库（境界/货币/体系/规则），跨作品共享
     # 排序优化：体系（官制等知识问答高频）优先，确保小模型注意力先落在上面
-    _CAT_ORDER = {"体系": 0, "境界": 1, "货币": 2, "规则": 3}
+    # _CAT_ORDER 已提升到模块级（见文件顶部），此处直接复用
     def _settings():
         rows = db.query(SettingORM).all()
         # 按 setting_ids 过滤：仅保留本小说选中的设定
@@ -179,6 +183,58 @@ def layer_world(db: Session, project_id: str, volume_id: str | None = None,
         content="\n".join(lines),
         priority=P_WORLD, order=20, min_chars=200,
     )
+
+
+# ===========================================================================
+# 设定库目录（B 方案：按需加载）
+# ===========================================================================
+
+def build_setting_catalog(db: Session, project_id: str) -> str:
+    """构造「设定库目录」——只列名称/类别/层级阶梯/摘要，不含完整描述。
+
+    用于 B 方案：把设定库从「描述常驻 system」改为「目录 + 按需加载」。
+    模型看到目录就知道本作品有哪些体系及层级阶梯（多数事实问答可直接据此回答），
+    需要某体系完整说明时通过 LOAD_SETTING:<id> 请求，后端再注入描述，避免全文占窗。
+
+    与参考文档的 LOAD_REFS 平行：两者用不同标记、不同 id 空间（SettingORM vs
+    ReferenceDocORM），可在同一首轮文本里同时出现，Pass1 一并解析。
+    """
+    # 项目选定设定过滤：仅展示本小说勾选的设定
+    _p = db.query(ProjectORM).filter_by(id=project_id).first()
+    _proj_setting_ids = set(_p.setting_ids) if (_p and _p.setting_ids) else None
+
+    def _load():
+        rows = db.query(SettingORM).all()
+        if _proj_setting_ids is not None:
+            rows = [s for s in rows if s.id in _proj_setting_ids]
+        rows.sort(key=lambda s: (_CAT_ORDER.get(s.category or "其它", 99), s.name))
+        if not rows:
+            return ""
+        lines = [
+            "## 设定库目录（世界观数据库·按需加载详情）",
+            "下面是本作品已选用的设定体系清单。除非回答需要某体系的完整说明，否则不要加载——直接作答即可。",
+            "各体系的层级阶梯已列在下方，多数事实问答可直接据此回答；需要完整描述时在正式回答前先输出一行：",
+            "  LOAD_SETTING:<id1>,<id2>",
+            "我会把对应设定详情注入后再让你作答。",
+            "",
+        ]
+        for s in rows:
+            levels = s.levels or []
+            ladder = "→".join(str(x) for x in levels[:12])
+            if ladder:
+                ladder = f"（{ladder}{'…' if len(levels) > 12 else ''}）"
+            line = f"- id={s.id} | [{s.category or '其它'}] {s.name} {ladder}"
+            lines.append(line)
+            summary = (s.description or "").strip().replace("\n", " ")
+            if summary:
+                lines.append(f"    摘要：{summary[:80]}")
+            tags = " ".join(f"#{t}" for t in (s.tags or [])[:6])
+            if tags:
+                lines.append(f"    标签：{tags}")
+        lines.append("")
+        return "\n".join(lines)
+
+    return _safe(_load) or ""
 
 
 # ===========================================================================

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.models.orm import ReferenceDocORM
+from app.models.orm import ReferenceDocORM, SettingORM
 from app.schemas.reference import ReferenceDocCreate, ReferenceDoc, ReferenceDocSummary
 
 # 单次正文上限（字符），防止超大文档撑爆上下文；超过仅截断并标注。
@@ -276,6 +276,54 @@ def fetch_refs_by_ids(db: Session, ids: list[str]) -> list[tuple[str, str]]:
         o = by_id.get(i)
         if o:
             out.append((o.filename, o.content_text or ""))
+    return out
+
+
+# ----------------------------------------------------------------------------
+# 设定库按需加载（B 方案）：与参考文档的 LOAD_REFS 平行。
+# 设定库（SettingORM）与参考文档（ReferenceDocORM）用不同标记 + 不同 id 空间，
+# 避免 id 碰撞；两者可在同一模型首轮文本里同时出现，Pass1 一并解析。
+# ----------------------------------------------------------------------------
+
+_LOAD_SETTING_RE = re.compile(r"LOAD_SETTING:\s*([0-9a-fA-F,\s]+)", re.IGNORECASE)
+
+
+def parse_load_setting(text: str) -> list[str] | None:
+    """从模型首轮回复里解析 LOAD_SETTING 指令（设定库按需加载）。
+
+    返回选中的设定 id 列表；若没有该指令则返回 None（表示模型直接作答、无需加载设定）。
+    容忍模型夹带少量其它文字——取第一个匹配即可。
+    """
+    if not text:
+        return None
+    m = _LOAD_SETTING_RE.search(text)
+    if not m:
+        return None
+    ids = [x.strip() for x in m.group(1).split(",") if x.strip()]
+    return ids or None
+
+
+def fetch_settings_by_ids(db: Session, ids: list[str]) -> list[tuple[str, str]]:
+    """按 id 批量取设定库详情（SettingORM.id，整表唯一，不限 project）。
+
+    返回 [(name, detail_text), ...]，按传入 id 顺序。detail 含层级阶梯 + 完整描述，
+    供 LOAD_SETTING 语义：一次往返取回全部选中设定，注入上下文。
+    """
+    if not ids:
+        return []
+    rows = db.query(SettingORM).filter(SettingORM.id.in_(ids)).all()
+    by_id = {o.id: o for o in rows}
+    out = []
+    for i in ids:
+        o = by_id.get(i)
+        if o:
+            parts = [f"【设定：{o.name}（{o.category or '其它'}）】"]
+            if o.levels:
+                parts.append("层级阶梯：" + "→".join(str(x) for x in o.levels))
+            desc = (o.description or "").strip()
+            if desc:
+                parts.append(desc)
+            out.append((o.name, "\n".join(parts) + "\n"))
     return out
 
 

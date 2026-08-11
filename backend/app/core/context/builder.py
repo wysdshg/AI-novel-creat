@@ -245,10 +245,8 @@ def build_discussion_system(
         if b is not None:
             blocks.append(b)
 
-    # 设定库按需展开：name+层级阶梯永远保留（模型始终知道有哪些体系），
-    # 仅 verbose description 按相关性展开，避免把所有体系全文常驻塞爆窗口。
-    _add(layers.layer_world(db, project_id, article_id=article_id,
-                            mode="relevant", query_text=query_text))
+    # 设定库改为 B 方案：目录 + 按需加载，不再把 description 常驻注入 system。
+    # 目录由 build_setting_catalog 生成并附在 system 末尾，详情按 LOAD_SETTING 拉取。
     _add(layers.layer_characters(db, project_id))
     _add(layers.layer_entities(db, project_id))
     _add(layers.layer_foreshadows(db, project_id))
@@ -261,11 +259,11 @@ def build_discussion_system(
     body = plan.render()
     if body:
         sys_parts.append(
-            "以下是这部作品的现有资料（含世界观数据库中的官制/境界/体系等权威设定），"
-            "回答必须以此为准：\n\n"
-            "⚠️ 重要：当问题涉及官制品级、境界等级、货币体系等设定时，"
-            "必须严格使用下方【体系】或【境界】分类中的数据作答，"
-            "不得使用你训练数据中的其他朝代或通用知识替代。\n\n"
+            "以下是这部作品的现有资料（角色/势力/伏笔/记忆等），回答必须以此为准：\n\n"
+            "⚠️ 重要：当问题涉及官制品级、境界等级、货币体系等世界观设定时，"
+            "若你已通过 LOAD_SETTING 加载了对应体系的完整说明，必须严格以其数据作答，"
+            "不得使用你训练数据中的其他朝代或通用知识替代；"
+            "若尚未加载，请先输出 LOAD_SETTING 加载后再答（见下方【设定库目录】）。\n\n"
             + body
         )
 
@@ -277,6 +275,15 @@ def build_discussion_system(
     # 事实类问答不强制给 2~3 个方案，避免硬凑。
     if is_advice_request(query_text):
         sys_parts.append(ADVICE_DIRECTIVE)
+
+    # 设定库目录（B 方案）：仅列体系+层级阶梯+摘要，详情按需 LOAD_SETTING 加载，
+    # 避免把全部设定描述常驻塞爆窗口。
+    try:
+        setting_catalog = layers.build_setting_catalog(db, project_id)
+        if setting_catalog:
+            sys_parts.append(setting_catalog)
+    except Exception as e:  # noqa: BLE001
+        print(f"[context.builder] 设定目录构造失败，跳过: {e}")
 
     system = "\n\n".join(p for p in sys_parts if p and p.strip())
     meta = {

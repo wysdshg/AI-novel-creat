@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.schemas.chapter import DiscussionMessageCreate, DiscussionChatRequest
 from app.core.response import ok
 from app.core.database import get_session
-from app.core.context import build_discussion_system
+from app.core.context import build_discussion_system, layers
 from app.services import model_crud, character_crud, faction_crud, location_crud
 from app.services.discussion_crud import (
     list_messages,
@@ -413,17 +413,25 @@ def chat(
                     first_text = ""
 
             selected_ids = ref_selector.select(first_text) if first_text else None
+            setting_ids = ref_svc.parse_load_setting(first_text) if first_text else None
 
-            if selected_ids:
-                load_ids = list(dict.fromkeys(selected_ids))  # 去重保序
-                blocks = ref_svc.fetch_refs_by_ids(db, load_ids)
-                if blocks:
-                    loaded = "\n\n".join(f"【参考资料：{fn}】\n{txt}" for fn, txt in blocks)
+            if selected_ids or setting_ids:
+                load_ref_ids = list(dict.fromkeys(selected_ids)) if selected_ids else []
+                load_set_ids = list(dict.fromkeys(setting_ids)) if setting_ids else []
+                ref_blocks = ref_svc.fetch_refs_by_ids(db, load_ref_ids) if load_ref_ids else []
+                set_blocks = ref_svc.fetch_settings_by_ids(db, load_set_ids) if load_set_ids else []
+                if ref_blocks or set_blocks:
+                    loaded_parts = []
+                    for fn, txt in ref_blocks:
+                        loaded_parts.append(f"【参考资料：{fn}】\n{txt}")
+                    for nm, det in set_blocks:
+                        loaded_parts.append(f"【设定库详情：{nm}】\n{det}")
+                    loaded = "\n\n".join(loaded_parts)
                     messages.append({
                         "role": "user",
-                        "content": f"已按你的请求加载以下参考资料正文，请据此作答：\n\n{loaded}",
+                        "content": f"已按你的请求加载以下资料/设定详情，请据此作答：\n\n{loaded}",
                     })
-                    yield f"event: refs\ndata: {json.dumps({'loaded': [fn for fn, _ in blocks], 'ids': load_ids}, ensure_ascii=False)}\n\n"
+                    yield f"event: refs\ndata: {json.dumps({'loaded': [fn for fn, _ in ref_blocks] + [nm for nm, _ in set_blocks], 'ids': load_ref_ids + load_set_ids}, ensure_ascii=False)}\n\n"
                     # Pass2：流式生成最终回复（带思考，按用户偏好）
                     if want_thinking and hasattr(adapter, "stream_thinking"):
                         for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
@@ -435,8 +443,8 @@ def chat(
                             assistant_text.append(clean)
                             yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
                 else:
-                    # 选中 id 无效：提示后直接作答，避免循环
-                    messages.append({"role": "user", "content": "你请求的参考资料未能加载（id 无效），请直接作答。"})
+                    # 选中 id 全部无效：提示后直接作答，避免循环
+                    messages.append({"role": "user", "content": "你请求的参考资料/设定未能加载（id 无效），请直接作答。"})
                     if want_thinking and hasattr(adapter, "stream_thinking"):
                         for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
                             assistant_thinking.append(t)
@@ -511,7 +519,9 @@ _GLOBAL_HISTORY_CHAR_BUDGET = 8000
 _GLOBAL_SYS = (
     "你是一名专业的小说创作助手（全局模式）。\n"
     "你可以回答关于写作技巧、世界观设定、角色设计、古代官制、修仙体系等任何问题。\n"
-    "当问题涉及特定世界观（如官制、境界体系）时，以下资料为权威参考，回答必须以资料为准：\n\n"
+    "当问题涉及特定世界观（如官制、境界体系）时，若你已通过 LOAD_SETTING 加载了对应体系的完整说明，"
+    "回答必须以其数据为准，不得使用训练数据中的其他朝代或通用知识替代；"
+    "若尚未加载，请先输出 LOAD_SETTING 加载后再答（见下方【设定库目录】）。\n"
     "【注意】\n"
     "1. 不要编造设定条数等精确数字；不清楚就据实列出你知道的名称，不要凭空捏造总数。\n"
     "2. 作者问「上一句是什么」时，只依据真实对话历史回答；技能示例中的不算真实对话。"
@@ -519,34 +529,22 @@ _GLOBAL_SYS = (
 
 
 def _build_global_system(db: Session) -> str:
-    """构建全局对话的 system prompt（仅含全局设定库 + 全局 SKILL，不含任何小说数据）。"""
+    """构建全局对话的 system prompt（仅含全局设定库目录 + 全局 SKILL，不含任何小说数据）。
+
+    B 方案：设定库走「目录 + 按需加载」（build_setting_catalog），
+    global 项目无 setting_ids 过滤 → 全部设定体系展示在目录中，详情按 LOAD_SETTING 拉取，
+    不再把全部设定描述常驻注入，避免撑爆全局对话的 system 窗口。
+    """
     parts = [_GLOBAL_SYS]
 
-    # 注入全局设定库（SettingORM 无 project_id，天然全局）
-    # 排序优化：体系（官制等知识问答高频）排在最前，确保小模型注意力优先落在上面；
-    # 其次境界/货币/规则/其它。
-    from app.models.orm import SettingORM
-    _CAT_ORDER = {"体系": 0, "境界": 1, "货币": 2, "规则": 3}
-    rows = db.query(SettingORM).all()
-    rows.sort(key=lambda s: (_CAT_ORDER.get(s.category or "其它", 99), s.name))
-    if rows:
-        by_cat: dict[str, list[str]] = {}
-        for s in rows:
-            desc = (s.description or "").strip()
-            levels = s.levels or []
-            piece = f"{s.name}"
-            if levels:
-                shown = "→".join(str(x) for x in levels[:12])
-                piece += f"（{shown}{'…' if len(levels) > 12 else ''}）"
-            if desc:
-                piece += f"：{desc}"
-            by_cat.setdefault(s.category or "其它", []).append(piece)
-        if by_cat:
-            lines = []
-            for cat, items in by_cat.items():
-                lines.append(f"[{cat}] " + "；".join(items))
-            parts.append("【世界观数据库（权威参考）】\n" + "\n".join(lines))
-            parts.append("\n⚠️ 以上数据为作者设定的权威资料，回答相关问题必须以此为准。")
+    # 注入全局设定库目录（SettingORM 无 project_id，天然全局；
+    # GLOBAL_PROJECT_ID 通常无 setting_ids → 全部展示）
+    try:
+        setting_catalog = layers.build_setting_catalog(db, GLOBAL_PROJECT_ID)
+        if setting_catalog:
+            parts.append(setting_catalog)
+    except Exception as e:  # noqa: BLE001
+        print(f"[discussion/global-chat] 设定目录构造失败，跳过: {e}")
 
     # 注入全局 SKILL
     skill_block = _collect_skill_blocks(db)
@@ -662,17 +660,25 @@ def global_chat(
                     first_text = ""
 
             selected_ids = ref_selector.select(first_text) if first_text else None
+            setting_ids = ref_svc.parse_load_setting(first_text) if first_text else None
 
-            if selected_ids:
-                load_ids = list(dict.fromkeys(selected_ids))
-                blocks = ref_svc.fetch_refs_by_ids(db, load_ids)
-                if blocks:
-                    loaded = "\n\n".join(f"【参考资料：{fn}】\n{txt}" for fn, txt in blocks)
+            if selected_ids or setting_ids:
+                load_ref_ids = list(dict.fromkeys(selected_ids)) if selected_ids else []
+                load_set_ids = list(dict.fromkeys(setting_ids)) if setting_ids else []
+                ref_blocks = ref_svc.fetch_refs_by_ids(db, load_ref_ids) if load_ref_ids else []
+                set_blocks = ref_svc.fetch_settings_by_ids(db, load_set_ids) if load_set_ids else []
+                if ref_blocks or set_blocks:
+                    loaded_parts = []
+                    for fn, txt in ref_blocks:
+                        loaded_parts.append(f"【参考资料：{fn}】\n{txt}")
+                    for nm, det in set_blocks:
+                        loaded_parts.append(f"【设定库详情：{nm}】\n{det}")
+                    loaded = "\n\n".join(loaded_parts)
                     messages.append({
                         "role": "user",
-                        "content": f"已按你的请求加载以下参考资料正文，请据此作答：\n\n{loaded}",
+                        "content": f"已按你的请求加载以下资料/设定详情，请据此作答：\n\n{loaded}",
                     })
-                    yield f"event: refs\ndata: {json.dumps({'loaded': [fn for fn, _ in blocks], 'ids': load_ids}, ensure_ascii=False)}\n\n"
+                    yield f"event: refs\ndata: {json.dumps({'loaded': [fn for fn, _ in ref_blocks] + [nm for nm, _ in set_blocks], 'ids': load_ref_ids + load_set_ids}, ensure_ascii=False)}\n\n"
                     if want_thinking and hasattr(adapter, "stream_thinking"):
                         for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
                             assistant_thinking.append(t)
@@ -683,7 +689,7 @@ def global_chat(
                             assistant_text.append(clean)
                             yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
                 else:
-                    messages.append({"role": "user", "content": "你请求的参考资料未能加载（id 无效），请直接作答。"})
+                    messages.append({"role": "user", "content": "你请求的参考资料/设定未能加载（id 无效），请直接作答。"})
                     if want_thinking and hasattr(adapter, "stream_thinking"):
                         for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
                             assistant_thinking.append(t)
