@@ -276,8 +276,8 @@ def build_discussion_system(
     if is_advice_request(query_text):
         sys_parts.append(ADVICE_DIRECTIVE)
 
-    # 设定库目录（B 方案）：仅列体系+层级阶梯+摘要，详情按需 LOAD_SETTING 加载，
-    # 避免把全部设定描述常驻塞爆窗口。
+    # 设定库目录（B 方案）：仅列 id + 名称，详情按需 LOAD_SETTING 加载，
+    # 避免把全部设定描述常驻塞爆窗口。风格与参考文档目录一致（只给标识，靠模型按需请求）。
     try:
         setting_catalog = layers.build_setting_catalog(db, project_id)
         if setting_catalog:

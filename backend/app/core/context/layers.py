@@ -190,14 +190,15 @@ def layer_world(db: Session, project_id: str, volume_id: str | None = None,
 # ===========================================================================
 
 def build_setting_catalog(db: Session, project_id: str) -> str:
-    """构造「设定库目录」——只列名称/类别/层级阶梯/摘要，不含完整描述。
+    """构造「设定库目录」——只列 id + 名称，不含层级阶梯/摘要/标签。
 
     用于 B 方案：把设定库从「描述常驻 system」改为「目录 + 按需加载」。
-    模型看到目录就知道本作品有哪些体系及层级阶梯（多数事实问答可直接据此回答），
-    需要某体系完整说明时通过 LOAD_SETTING:<id> 请求，后端再注入描述，避免全文占窗。
+    模型凭名称即可判断该加载哪个设定，需要完整说明时通过 LOAD_SETTING:<id>
+    请求，后端再注入详情，避免全文占窗。
 
     与参考文档的 LOAD_REFS 平行：两者用不同标记、不同 id 空间（SettingORM vs
     ReferenceDocORM），可在同一首轮文本里同时出现，Pass1 一并解析。
+    目录风格刻意与参考文档目录保持一致——只给 id + 名称，靠模型按需请求。
     """
     # 项目选定设定过滤：仅展示本小说勾选的设定
     _p = db.query(ProjectORM).filter_by(id=project_id).first()
@@ -212,25 +213,16 @@ def build_setting_catalog(db: Session, project_id: str) -> str:
             return ""
         lines = [
             "## 设定库目录（世界观数据库·按需加载详情）",
-            "下面是本作品已选用的设定体系清单。除非回答需要某体系的完整说明，否则不要加载——直接作答即可。",
-            "各体系的层级阶梯已列在下方，多数事实问答可直接据此回答；需要完整描述时在正式回答前先输出一行：",
+            "下面是本作品已选用的设定体系清单（仅列名称，不含说明）。",
+            "除非回答需要某体系的完整说明，否则不要加载——直接作答即可。",
+            "需要某设定完整内容（含层级、描述、标签）时，在正式回答前先输出一行：",
             "  LOAD_SETTING:<id1>,<id2>",
             "我会把对应设定详情注入后再让你作答。",
             "",
         ]
         for s in rows:
-            levels = s.levels or []
-            ladder = "→".join(str(x) for x in levels[:12])
-            if ladder:
-                ladder = f"（{ladder}{'…' if len(levels) > 12 else ''}）"
-            line = f"- id={s.id} | [{s.category or '其它'}] {s.name} {ladder}"
+            line = f"- id={s.id} | [{s.category or '其它'}] {s.name}"
             lines.append(line)
-            summary = (s.description or "").strip().replace("\n", " ")
-            if summary:
-                lines.append(f"    摘要：{summary[:80]}")
-            tags = " ".join(f"#{t}" for t in (s.tags or [])[:6])
-            if tags:
-                lines.append(f"    标签：{tags}")
         lines.append("")
         return "\n".join(lines)
 
