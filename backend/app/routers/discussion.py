@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.schemas.chapter import DiscussionMessageCreate, DiscussionChatRequest
 from app.core.response import ok
 from app.core.database import get_session
+import app.core.database as _db
 from app.core.context import build_discussion_system, layers
 from app.services import model_crud, character_crud, faction_crud, location_crud
 from app.services.discussion_crud import (
@@ -305,6 +306,23 @@ def chat(
     default = _resolve_model(db, body.model_id)
     use_model = default is not None and (default.status or "active") == "active"
 
+    # 在请求级 session 仍打开时，把 ModelConfigORM 的标量字段提取为普通 dict。
+    # 流式生成器在线程池运行，届时请求 session 已关闭，直接访问 default.* 会触发
+    # DetachedInstanceError 并使 StreamingResponse 断流（BodyStreamBuffer was aborted）。
+    model_cfg: dict | None = None
+    if default is not None:
+        model_cfg = {
+            "id": default.id,
+            "vendor": default.vendor,
+            "api_base": default.api_base,
+            "api_key": default.api_key,
+            "model_name": default.model_name,
+            "temperature": default.temperature,
+            "top_p": default.top_p,
+            "max_tokens": default.max_tokens,
+            "enable_thinking": default.enable_thinking,
+        }
+
     # ▼▼▼ 请求日志（调试用，前端发什么后端收什么）▼▼▼
     print("=" * 60)
     print(f"[discussion/chat] 收到请求 project_id={project_id} chapter_id={chapter_id}")
@@ -339,14 +357,19 @@ def chat(
             yield "event: done\ndata: {}\n\n"
             return
 
+        # 流式生成器在线程池运行，请求级 session 已关闭。自建独立 session 供内部所有
+        # DB 操作使用，避免 DetachedInstanceError 导致流中断。
+        # 注意：跨模块直接 import SessionLocal 会在导入时绑定到 None（get_engine 在启动时
+        # 才赋值），必须用模块引用 _db.SessionLocal() 在运行时取最新值。
+        gen_db = _db.SessionLocal()
         config = {
-            "api_base": default.api_base,
-            "api_key": default.api_key,
-            "model_name": default.model_name,
-            "temperature": default.temperature,
-            "top_p": default.top_p,
-            "max_tokens": default.max_tokens,
-            "enable_thinking": default.enable_thinking if body.enable_thinking is None else body.enable_thinking,
+            "api_base": model_cfg["api_base"],
+            "api_key": model_cfg["api_key"],
+            "model_name": model_cfg["model_name"],
+            "temperature": model_cfg["temperature"],
+            "top_p": model_cfg["top_p"],
+            "max_tokens": model_cfg["max_tokens"],
+            "enable_thinking": model_cfg["enable_thinking"] if body.enable_thinking is None else body.enable_thinking,
         }
         # 上下文引擎：把世界观/角色/势力/伏笔/记忆注入商讨，
         # 顾问才能回答「张三现在什么境界」而不是现编。
@@ -359,17 +382,17 @@ def chat(
                 break
         try:
             sys_prompt, ctx_meta = build_discussion_system(
-                db, project_id, chapter_id=chapter_id, query_text=_latest_user
+                gen_db, project_id, chapter_id=chapter_id, query_text=_latest_user
             )
             yield f"event: context\ndata: {json.dumps(ctx_meta, ensure_ascii=False)}\n\n"
         except Exception as e:  # noqa: BLE001
             print(f"[discussion/chat] 上下文组装失败，降级: {e}")
-            sys_prompt = _SYS_PROMPT + _collect_skill_blocks(db)
+            sys_prompt = _SYS_PROMPT + _collect_skill_blocks(gen_db)
 
         # 按需加载目录：把「可用参考文件清单」作为稳定前缀挂到 system（配合 Ollama cache_prompt 缓存，
         # 后续轮次前缀 KV 复用）。AI 仅在需要时通过 LOAD_REFS:<ids> 请求加载具体正文，避免全量塞爆窗口。
         try:
-            catalog = ref_svc.build_catalog(db, project_id, article_id=chapter_id, include_global=True)
+            catalog = ref_svc.build_catalog(gen_db, project_id, article_id=chapter_id, include_global=True)
             catalog_text = ref_svc.format_catalog_prompt(catalog, include_global=True)
             if catalog_text:
                 sys_prompt = (
@@ -389,8 +412,8 @@ def chat(
                 role = (m or {}).get("role", "user")
                 messages.append({"role": role, "content": content})
 
-        want_thinking = body.enable_thinking if body.enable_thinking is not None else default.enable_thinking
-        temperature = body.temperature or default.temperature
+        want_thinking = body.enable_thinking if body.enable_thinking is not None else model_cfg["enable_thinking"]
+        temperature = body.temperature or model_cfg["temperature"]
 
         # 参考「选择阶段」策略：默认 marker(A)，未来强 API 可切 toolcall(B)。见 reference_selector。
         ref_selector = get_reference_selector()
@@ -398,8 +421,8 @@ def chat(
         assistant_text: list[str] = []
         assistant_thinking: list[str] = []
         try:
-            adapter = get_adapter(default.vendor, config)
-            print(f'[discussion] 模型={default.model_name} ({default.vendor}) | api_base={default.api_base[:50]} | thinking={want_thinking}')
+            adapter = get_adapter(model_cfg["vendor"], config)
+            print(f'[discussion] 模型={model_cfg["model_name"]} ({model_cfg["vendor"]}) | api_base={(model_cfg["api_base"] or "")[:50]} | thinking={want_thinking}')
 
             # ---- 按需参考加载（两阶段）----
             # Pass1：非流式、think=false，让模型决定是否需要参考文件（输出 LOAD_REFS:<ids>）或直接作答。
@@ -418,8 +441,8 @@ def chat(
             if selected_ids or setting_ids:
                 load_ref_ids = list(dict.fromkeys(selected_ids)) if selected_ids else []
                 load_set_ids = list(dict.fromkeys(setting_ids)) if setting_ids else []
-                ref_blocks = ref_svc.fetch_refs_by_ids(db, load_ref_ids) if load_ref_ids else []
-                set_blocks = ref_svc.fetch_settings_by_ids(db, load_set_ids) if load_set_ids else []
+                ref_blocks = ref_svc.fetch_refs_by_ids(gen_db, load_ref_ids) if load_ref_ids else []
+                set_blocks = ref_svc.fetch_settings_by_ids(gen_db, load_set_ids) if load_set_ids else []
                 if ref_blocks or set_blocks:
                     loaded_parts = []
                     for fn, txt in ref_blocks:
@@ -482,7 +505,7 @@ def chat(
                 conv_id = body.conversation_id
                 if full:
                     add_message(
-                        db,
+                        gen_db,
                         project_id,
                         "assistant",
                         full,
@@ -497,13 +520,15 @@ def chat(
             # 复用用户本轮对话选择的模型（default 即 _resolve_model 解析结果），不固定 Ollama/默认
             try:
                 suggestion = _build_entity_suggestion(
-                    db, project_id, last_user_content, "".join(assistant_text),
-                    model_id=default.id if default else None,
+                    gen_db, project_id, last_user_content, "".join(assistant_text),
+                    model_id=model_cfg["id"] if model_cfg else None,
                 )
                 if suggestion:
                     yield "event: entity_suggestion\ndata: " + json.dumps(suggestion, ensure_ascii=False) + "\n\n"
             except Exception as e:  # noqa: BLE001
                 print(f"[discussion/chat] 实体建议抽取失败: {e}")
+            # 关闭流式生成器自建的 session（finally 保证正常/异常都释放）
+            gen_db.close()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -567,6 +592,22 @@ def global_chat(
     default = _resolve_model(db, body.model_id)
     use_model = default is not None and (default.status or "active") == "active"
 
+    # 在请求级 session 仍打开时，把 ModelConfigORM 的标量字段提取为普通 dict，
+    # 避免流式生成器（线程池运行）访问已关闭 session 触发 DetachedInstanceError。
+    model_cfg: dict | None = None
+    if default is not None:
+        model_cfg = {
+            "id": default.id,
+            "vendor": default.vendor,
+            "api_base": default.api_base,
+            "api_key": default.api_key,
+            "model_name": default.model_name,
+            "temperature": default.temperature,
+            "top_p": default.top_p,
+            "max_tokens": default.max_tokens,
+            "enable_thinking": default.enable_thinking,
+        }
+
     last_user_content = ""
     for m in reversed(body.messages):
         if (m or {}).get("role") == "user":
@@ -589,18 +630,23 @@ def global_chat(
             yield "event: done\ndata: {}\n\n"
             return
 
+        # 流式生成器在线程池运行，请求级 session 已关闭。自建独立 session 供内部所有
+        # DB 操作使用，避免 DetachedInstanceError 导致流中断。
+        # 注意：跨模块直接 import SessionLocal 会在导入时绑定到 None（get_engine 在启动时
+        # 才赋值），必须用模块引用 _db.SessionLocal() 在运行时取最新值。
+        gen_db = _db.SessionLocal()
         config = {
-            "api_base": default.api_base,
-            "api_key": default.api_key,
-            "model_name": default.model_name,
-            "temperature": default.temperature,
-            "top_p": default.top_p,
-            "max_tokens": default.max_tokens,
-            "enable_thinking": default.enable_thinking if body.enable_thinking is None else body.enable_thinking,
+            "api_base": model_cfg["api_base"],
+            "api_key": model_cfg["api_key"],
+            "model_name": model_cfg["model_name"],
+            "temperature": model_cfg["temperature"],
+            "top_p": model_cfg["top_p"],
+            "max_tokens": model_cfg["max_tokens"],
+            "enable_thinking": model_cfg["enable_thinking"] if body.enable_thinking is None else body.enable_thinking,
         }
 
         try:
-            sys_prompt = _build_global_system(db)
+            sys_prompt = _build_global_system(gen_db)
             ctx_meta = {"mode": "global", "global_chat": True}
             yield f"event: context\ndata: {json.dumps(ctx_meta, ensure_ascii=False)}\n\n"
         except Exception as e:
@@ -609,7 +655,7 @@ def global_chat(
 
         # 全局参考文档目录（可选注入）
         try:
-            catalog = ref_svc.build_catalog(db, GLOBAL_PROJECT_ID, include_global=True)
+            catalog = ref_svc.build_catalog(gen_db, GLOBAL_PROJECT_ID, include_global=True)
             catalog_text = ref_svc.format_catalog_prompt(catalog, include_global=True)
             if catalog_text:
                 sys_prompt = (
@@ -640,16 +686,16 @@ def global_chat(
 
         messages = [{"role": "system", "content": sys_prompt}] + kept
 
-        want_thinking = body.enable_thinking if body.enable_thinking is not None else default.enable_thinking
-        temperature = body.temperature or default.temperature
+        want_thinking = body.enable_thinking if body.enable_thinking is not None else model_cfg["enable_thinking"]
+        temperature = body.temperature or model_cfg["temperature"]
 
         ref_selector = get_reference_selector()
 
         assistant_text: list[str] = []
         assistant_thinking: list[str] = []
         try:
-            adapter = get_adapter(default.vendor, config)
-            print(f'[discussion] 模型={default.model_name} ({default.vendor}) | api_base={default.api_base[:50]} | thinking={want_thinking}')
+            adapter = get_adapter(model_cfg["vendor"], config)
+            print(f'[discussion] 模型={model_cfg["model_name"]} ({model_cfg["vendor"]}) | api_base={(model_cfg["api_base"] or "")[:50]} | thinking={want_thinking}')
 
             first_text = ""
             if hasattr(adapter, "chat"):
@@ -665,8 +711,8 @@ def global_chat(
             if selected_ids or setting_ids:
                 load_ref_ids = list(dict.fromkeys(selected_ids)) if selected_ids else []
                 load_set_ids = list(dict.fromkeys(setting_ids)) if setting_ids else []
-                ref_blocks = ref_svc.fetch_refs_by_ids(db, load_ref_ids) if load_ref_ids else []
-                set_blocks = ref_svc.fetch_settings_by_ids(db, load_set_ids) if load_set_ids else []
+                ref_blocks = ref_svc.fetch_refs_by_ids(gen_db, load_ref_ids) if load_ref_ids else []
+                set_blocks = ref_svc.fetch_settings_by_ids(gen_db, load_set_ids) if load_set_ids else []
                 if ref_blocks or set_blocks:
                     loaded_parts = []
                     for fn, txt in ref_blocks:
@@ -724,7 +770,7 @@ def global_chat(
                 full = "".join(assistant_text)
                 if full:
                     add_message(
-                        db,
+                        gen_db,
                         GLOBAL_PROJECT_ID,
                         "assistant",
                         full,
@@ -733,6 +779,7 @@ def global_chat(
                     )
             except Exception as e:  # noqa: BLE001
                 print(f"[discussion/global-chat] 持久化失败: {e}")
-                print(f"[discussion/global-chat] 持久化失败: {e}")
+            # 关闭流式生成器自建的 session（finally 保证正常/异常都释放）
+            gen_db.close()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
