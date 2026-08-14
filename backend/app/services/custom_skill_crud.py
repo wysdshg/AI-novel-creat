@@ -58,6 +58,8 @@ def create_custom_skill(db: Session, data: CustomSkillCreate) -> CustomSkill:
         trigger=data.trigger or "all",
         enabled=data.enabled,
         tags=data.tags or [],
+        category=data.category or "通用",
+        priority=data.priority if data.priority is not None else 100,
         created_at=now,
         updated_at=now,
     )

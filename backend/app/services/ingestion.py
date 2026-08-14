@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import layers
 from app.core.gateway.registry import get_adapter
-from app.models.orm import ChapterORM
+from app.models.orm import ChapterORM, ArticleORM, VolumeORM, ProjectORM
 from app.services import (
     app_config, discussion_crud, memory_crud, model_crud,
     reference_crud, skill_dispatch,
@@ -224,6 +224,8 @@ def ingest_chapter(
     project_id: str,
     chapter: ChapterORM,
     push_directions: bool | None = None,
+    push_chapter_id: str | None = None,
+    push_conversation_id: str | None = None,
 ) -> dict:
     """一章写完后的全部收尾动作。
 
@@ -315,8 +317,14 @@ def ingest_chapter(
     if push_directions and dirs:
         try:
             body = _render_directions(chapter.chapter_no, dirs)
+            # 走向建议推回「被生成的这一章」自己的对话线程（push_chapter_id=chapter.id）：
+            # 保证「第N章的走向出现在第N章的对话框」，而不是小说级默认线程（问题2 根因）。
+            # thread 优先级：conversation_id > chapter_id > 小说级；push_conversation_id 为 None
+            # 时完全由 chapter_id 决定归属（调用方在 chapter.py 传入被生成章的 id）。
             discussion_crud.add_message(
                 db, project_id, role="assistant", content=body,
+                chapter_id=push_chapter_id,
+                conversation_id=push_conversation_id,
                 meta={
                     "type": "post_chapter_directions",
                     "chapter_id": chapter.id,
@@ -339,6 +347,139 @@ def ingest_chapter(
     except Exception as e:  # noqa: BLE001
         print(f"[ingestion] 阶段压缩失败: {e}")
 
+    return result
+
+
+# ===========================================================================
+# 概览向上聚合（问题1）：章 → 篇 → 卷 → 小说
+# ===========================================================================
+
+def _strip_text(text: str) -> str:
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        t = t.split("\n", 1)[-1] if "\n" in t else t
+        if t.endswith("```"):
+            t = t[:-3]
+    return t.strip()
+
+
+def _concat_summary(child_summaries, cap: int = 500) -> str | None:
+    """把子级摘要拼接成一段（避免调用模型，用于自动模式兜底 / 降级）。"""
+    parts = [s for s in child_summaries if s and str(s).strip()]
+    if not parts:
+        return None
+    text = "；".join(p.strip() for p in parts)
+    if len(text) > cap:
+        text = text[:cap] + "…"
+    return text or None
+
+
+def _resolve_agg_model(db: Session, model_id: str | None = None):
+    """聚合用模型：优先用调用方指定的 model_id（与对话页所选一致），否则 memory 角色 / 默认模型。"""
+    if model_id:
+        m = model_crud.get_model(db, model_id)
+        if m and (m.status or "active") == "active":
+            return m
+    return _pick_model(db)
+
+
+def _llm_compress_summary(heading: str, child_summaries: list[str], target_words: int,
+                          model) -> str | None:
+    """用模型把若干子级摘要压成一段约 target_words 字的连贯概览。失败返回 None。"""
+    bullet = "\n".join(f"- {s}" for s in child_summaries if s and str(s).strip())
+    if not bullet:
+        return None
+    prompt = (
+        f"你是小说编辑，把下面「{heading}」下属各部分的摘要压成一段连贯的概览，"
+        f"约 {target_words} 字。要求：只写主线进展与关键变化，不要评价、不要分点、"
+        f"不要标题、不要以「好的 / 以下是」开头。\n{bullet}"
+    )
+    try:
+        cfg = dict(_model_config(model))
+        cfg["max_tokens"] = 600
+        adapter = get_adapter(model.vendor, cfg)
+        text = adapter.chat([{"role": "user", "content": prompt}])
+        return _strip_text(text) or None
+    except Exception as e:  # noqa: BLE001
+        print(f"[aggregation] LLM 压缩失败({heading}): {type(e).__name__}: {str(e)[:150]}")
+        return None
+
+
+def aggregate_overview(db: Session, project_id: str, article_id: str | None = None,
+                       auto: bool = True, model_id: str | None = None) -> dict:
+    """向上聚合概览并写回各 ORM 的 summary 字段（问题1：AI 生成完章节后的自动概览）。
+
+    - auto=True（章生成后后台自动调用）：篇级用 LLM 压缩；卷/小说级退化为拼接子级摘要，
+      保证概览页永不出现「暂无 AI 概览」占位，且不额外烧 API（规避 NVIDIA 限流）。
+    - auto=False（手动「刷新概览」）：篇/卷/小说三级全部用 LLM 压缩，产出精修概览；
+      LLM 不可用时退化拼接，保证总能出内容。
+    每一层独立 try，失败只降级/跳过，不阻断其它层。返回各层更新条数。
+    """
+    result = {"articles": 0, "volumes": 0, "project": 0}
+    model = _resolve_agg_model(db, model_id)
+
+    # ---- 0. 选范围 ----
+    if article_id:
+        arts = db.query(ArticleORM).filter_by(id=article_id, project_id=project_id).all()
+    else:
+        arts = db.query(ArticleORM).filter_by(project_id=project_id).all()
+
+    # ---- 1. 篇级 ----
+    for art in arts:
+        mems = memory_crud.list_chapter_memories(db, project_id, article_id=art.id)
+        # 跳过以「（」开头的规则兜底空摘要（如「本章摘要抽取失败…」）
+        child = [m.summary for m in mems
+                 if (m.summary or "").strip() and not m.summary.startswith("（")]
+        if not child:
+            continue
+        if model is not None:
+            s = _llm_compress_summary(f"篇《{art.name}》", child, 200, model)
+        else:
+            s = None
+        if not s:
+            s = _concat_summary(child, cap=500)
+        if s and s != (art.summary or ""):
+            art.summary = s
+            result["articles"] += 1
+
+    # ---- 2. 卷级 ----
+    if article_id and arts:
+        vol_ids = list({a.volume_id for a in arts if a.volume_id})
+    else:
+        vol_ids = [v.id for v in db.query(VolumeORM).filter_by(project_id=project_id).all()]
+    volumes = db.query(VolumeORM).filter(VolumeORM.id.in_(vol_ids)).all() if vol_ids else []
+    for vol in volumes:
+        arts_in = db.query(ArticleORM).filter_by(volume_id=vol.id, project_id=project_id).all()
+        child = [a.summary for a in arts_in if (a.summary or "").strip()]
+        if not child:
+            continue
+        if (not auto) and model is not None:
+            s = _llm_compress_summary(f"卷《{vol.name}》", child, 250, model) or _concat_summary(child, cap=600)
+        else:
+            s = _concat_summary(child, cap=600)
+        if s and s != (vol.summary or ""):
+            vol.summary = s
+            result["volumes"] += 1
+
+    # ---- 3. 小说级 ----
+    all_vols = db.query(VolumeORM).filter_by(project_id=project_id).all()
+    child = [v.summary for v in all_vols if (v.summary or "").strip()]
+    if child:
+        if (not auto) and model is not None:
+            s = _llm_compress_summary("小说总览", child, 300, model) or _concat_summary(child, cap=800)
+        else:
+            s = _concat_summary(child, cap=800)
+        proj = db.query(ProjectORM).filter_by(id=project_id).first()
+        if proj and s and s != (proj.summary or ""):
+            proj.summary = s
+            result["project"] += 1
+
+    try:
+        db.commit()
+    except Exception as e:  # noqa: BLE001
+        print(f"[aggregation] 提交失败: {e}")
+        db.rollback()
     return result
 
 

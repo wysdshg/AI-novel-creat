@@ -31,6 +31,7 @@ from app.models.orm import ChapterORM, CustomSkillORM
 from app.services import reference_crud as ref_svc
 from app.services.reference_crud import GLOBAL_PROJECT_ID
 from app.services.reference_selector import get_reference_selector
+from app.services import load_observation as load_obs
 
 
 def _resolve_model(db: Session, model_id: Optional[str] = None):
@@ -432,6 +433,17 @@ def chat(
         # 参考「选择阶段」策略：默认 marker(A)，未来强 API 可切 toolcall(B)。见 reference_selector。
         ref_selector = get_reference_selector()
 
+        # ---- P0 观测：记录本轮实际加载了哪些设定/参考（不阻塞主流程）----
+        obs = {
+            "question": _latest_user,
+            "load_ref_ids": [],
+            "load_setting_ids": [],
+            "ref_loaded": False,
+            "setting_loaded": False,
+            "short_circuited": False,
+            "pass1_failed": False,
+        }
+
         assistant_text: list[str] = []
         assistant_thinking: list[str] = []
         try:
@@ -455,9 +467,13 @@ def chat(
             if selected_ids or setting_ids:
                 load_ref_ids = list(dict.fromkeys(selected_ids)) if selected_ids else []
                 load_set_ids = list(dict.fromkeys(setting_ids)) if setting_ids else []
+                obs["load_ref_ids"] = load_ref_ids
+                obs["load_setting_ids"] = load_set_ids
                 ref_blocks = ref_svc.fetch_refs_by_ids(gen_db, load_ref_ids) if load_ref_ids else []
                 set_blocks = ref_svc.fetch_settings_by_ids(gen_db, load_set_ids) if load_set_ids else []
                 if ref_blocks or set_blocks:
+                    obs["ref_loaded"] = bool(ref_blocks)
+                    obs["setting_loaded"] = bool(set_blocks)
                     loaded_parts = []
                     for fn, txt in ref_blocks:
                         loaded_parts.append(f"【参考资料：{fn}】\n{txt}")
@@ -494,12 +510,14 @@ def chat(
             else:
                 if first_text:
                     # 模型判断无需参考：Pass1 即最终回答，单调用（省一次）
+                    obs["short_circuited"] = True
                     clean = _strip_load_refs(first_text)
                     if clean:
                         assistant_text.append(clean)
                         yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
                 else:
                     # chat 不可用：退回单次流式（旧行为）
+                    obs["pass1_failed"] = True
                     if want_thinking and hasattr(adapter, "stream_thinking"):
                         for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
                             assistant_thinking.append(t)
@@ -541,6 +559,19 @@ def chat(
                     yield "event: entity_suggestion\ndata: " + json.dumps(suggestion, ensure_ascii=False) + "\n\n"
             except Exception as e:  # noqa: BLE001
                 print(f"[discussion/chat] 实体建议抽取失败: {e}")
+            # P0 观测落库（记录本轮设定/参考加载情况，失败静默）
+            try:
+                load_obs.record(
+                    gen_db,
+                    project_id=project_id,
+                    conversation_id=body.conversation_id,
+                    chapter_id=chapter_id,
+                    model_id=model_cfg["id"] if model_cfg else None,
+                    vendor=model_cfg["vendor"] if model_cfg else None,
+                    **obs,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[discussion/chat] 观测落库失败: {e}")
             # 关闭流式生成器自建的 session（finally 保证正常/异常都释放）
             gen_db.close()
 
@@ -720,6 +751,17 @@ def global_chat(
 
         ref_selector = get_reference_selector()
 
+        # ---- P0 观测：记录本轮实际加载了哪些设定/参考（不阻塞主流程）----
+        obs = {
+            "question": last_user_content,
+            "load_ref_ids": [],
+            "load_setting_ids": [],
+            "ref_loaded": False,
+            "setting_loaded": False,
+            "short_circuited": False,
+            "pass1_failed": False,
+        }
+
         assistant_text: list[str] = []
         assistant_thinking: list[str] = []
         try:
@@ -740,9 +782,13 @@ def global_chat(
             if selected_ids or setting_ids:
                 load_ref_ids = list(dict.fromkeys(selected_ids)) if selected_ids else []
                 load_set_ids = list(dict.fromkeys(setting_ids)) if setting_ids else []
+                obs["load_ref_ids"] = load_ref_ids
+                obs["load_setting_ids"] = load_set_ids
                 ref_blocks = ref_svc.fetch_refs_by_ids(gen_db, load_ref_ids) if load_ref_ids else []
                 set_blocks = ref_svc.fetch_settings_by_ids(gen_db, load_set_ids) if load_set_ids else []
                 if ref_blocks or set_blocks:
+                    obs["ref_loaded"] = bool(ref_blocks)
+                    obs["setting_loaded"] = bool(set_blocks)
                     loaded_parts = []
                     for fn, txt in ref_blocks:
                         loaded_parts.append(f"【参考资料：{fn}】\n{txt}")
@@ -776,11 +822,13 @@ def global_chat(
                             yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
             else:
                 if first_text:
+                    obs["short_circuited"] = True
                     clean = _strip_load_refs(first_text)
                     if clean:
                         assistant_text.append(clean)
                         yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
                 else:
+                    obs["pass1_failed"] = True
                     if want_thinking and hasattr(adapter, "stream_thinking"):
                         for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
                             assistant_thinking.append(t)
@@ -808,7 +856,32 @@ def global_chat(
                     )
             except Exception as e:  # noqa: BLE001
                 print(f"[discussion/global-chat] 持久化失败: {e}")
+            # P0 观测落库（记录本轮设定/参考加载情况，失败静默）
+            try:
+                load_obs.record(
+                    gen_db,
+                    project_id=GLOBAL_PROJECT_ID,
+                    model_id=model_cfg["id"] if model_cfg else None,
+                    vendor=model_cfg["vendor"] if model_cfg else None,
+                    **obs,
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[discussion/global-chat] 观测落库失败: {e}")
             # 关闭流式生成器自建的 session（finally 保证正常/异常都释放）
             gen_db.close()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.get("/discussion/load-logs")
+def list_load_logs(
+    project_id: Optional[str] = None,
+    limit: int = 200,
+    db: Session = Depends(get_session),
+):
+    """P0 观测查询：返回设定/参考加载日志（可按小说过滤，默认最近 200 条）。
+
+    数据来自 discussion_load_logs 表：每轮商讨记录模型请求了哪些 LOAD_SETTING/LOAD_REFS、
+    是否真的注入、是否短路。后续做关联边/BM25 阈值/频率预载都以此为准。
+    """
+    return ok(load_obs.list_logs(db, project_id=project_id, limit=limit))

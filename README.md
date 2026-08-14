@@ -89,21 +89,22 @@ E:\AI小说创作\
 ## 5. 如何运行（本机实测路径）
 
 ### 5.1 后端
-> ⚠️ 本项目的 Python 在**受管虚拟环境**，不是 `backend/.venv`。
+> ⚠️ 本项目的 Python 在**项目自带的虚拟环境** `E:\AI小说创作\.venv`（Python 3.12.10），**不是**受管环境 `C:/Users/w3013/.workbuddy/binaries/python/envs/default`，也不是 `backend/.venv`。
 
 ```bash
-# 虚拟环境（已装好依赖）
-PYTHON="C:/Users/w3013/.workbuddy/binaries/python/envs/default/Scripts/python.exe"
+# 虚拟环境（项目自带，已装好依赖：见 backend/requirements.txt）
+PYTHON="E:/AI小说创作/.venv/Scripts/python.exe"
 
 cd E:/AI小说创作/backend
-# 推荐：用 dev.py 启动，已默认开启 --reload，改后端代码自动热重启
+# 推荐：用 dev.py 启动（默认关闭 --reload，见下方说明）
 $PYTHON dev.py
 # 接口文档： http://localhost:8000/docs
 
-# 等价手写（不推荐手写，易忘开 reload）：
+# 等价手写（需手动开 reload，沙箱/共享盘环境下不推荐）：
 # $PYTHON -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
-- ⚠️ **「改后端自动重启」在本环境并不可靠**：`dev.py` 虽默认 `reload=True`，但后端进程跑在**宿主**、沙箱对 `E:\` 共享盘的文件编辑不触发宿主 uvicorn 的文件监听（共享盘 inotify/polling 失效，且 reload 偶发卡在坏状态）。**改任何后端代码后，必须由用户在宿主侧手动杀 8000 端口进程再重启**（见 §7 环境坑）。
+- ⚠️ **`dev.py` 默认 `reload=False`**（源码 `DEV_RELOAD` 默认 `"0"`，仅 `DEV_RELOAD=1` 才开）：在 `E:\` 共享盘/沙箱下 reload 既不可靠又会拉出关不掉的 8000 孤儿进程（见记忆⑤），故默认关闭。
+- ⚠️ **「改后端自动重启」在本环境并不可靠**：后端进程跑在**宿主**、沙箱对 `E:\` 共享盘的文件编辑不触发宿主 uvicorn 的文件监听（共享盘 inotify/polling 失效，且 reload 偶发卡在坏状态）。**改任何后端代码后，必须由用户在宿主侧手动杀 8000 端口进程再重启**（见 §7 环境坑）。
 - ✅ **已根治「新 ORM 列报 no such column」**：`core/database.py` 的 `init_db` 启动时自动比对 ORM 与表结构，缺失列自动 `ALTER TABLE ADD COLUMN`（仅覆盖「新增列」；删除/重命名列不在范围内，仍建议另写迁移）。
 
 ### 5.2 前端

@@ -22,11 +22,22 @@ BASE_SYSTEM = (
     "你是一名中文网络小说的职业代笔，为作者续写正文。\n"
     "【铁律】\n"
     "1. 只输出本章正文，全中文（含标点）。不写标题、不写「好的」「本章如下」之类的开场白。\n"
-    "2. 严禁输出英文、Markdown 标记、大纲罗列、你的思考或规划过程。\n"
+    "2. ⚠️【严禁英文夹杂】正文必须是纯中文叙事，严禁夹带任何英文单词、拉丁字母、拼音或数字代号；"
+    "表达「合理/可能/显然/重要」等概念必须用中文词，绝不可写 reasonable / possible / obviously 之类；"
+    "即使写人物内心思考，思考内容也要用中文写出。\n"
     "3. 严禁复述本提示词的任何内容。\n"
     "4. 人物性格、境界、称呼、已发生剧情必须与下方资料一致；资料没写的可以合理发挥，"
     "但不得与资料冲突。\n"
-    "5. 开头自然承接上一章结尾，结尾留下推动下一章的钩子。"
+    "5. 开头自然承接上一章结尾，结尾留下推动下一章的钩子。\n"
+    "6. ⚠️【严禁复读】同一句完整描述（≥12字）、同一动作、同一心理活动、同一人物反应，"
+    "在全章中绝不可原文重复出现；如需呼应前文，必须换用不同词句或不同视角改写，不得照搬。\n"
+    "7. ⚠️【对话推进】每段对话必须带来新信息或新冲突，禁止用「他说/她说」来回重复同一套问答；"
+    "对话标签必须多样化（道/低声道/沉声/冷笑/缓缓/截口/摇头），不得连续使用同一标签。\n"
+    "8. ⚠️【节奏】每 2~3 个段落必须推进剧情或揭示一项新事实，禁止原地打转、"
+    "禁止用不同问句包装同一个问题反复发问。\n"
+    "9. ⚠️【格式要求】正文须全程使用中文标点（逗号、句号、顿号、引号、冒号、破折号、省略号），"
+    "每 40 字内至少出现一处标点；按场景转换、对话、动作切换自然换段，单段不超过 4 行，"
+    "对话与动作交替时及时分段；内心独白、回忆、梦境同样用中文标点正常断句换段。\n"
 )
 
 # [MARK: DOC-ID-LOAD-SAFETY] 本系统提示词中任何「禁止暴露内部标记/id」的禁令，
@@ -136,6 +147,8 @@ def build_chapter_messages(
     from_discussion: bool = True,
     budget_level: str | None = None,
     layer_mode: str | None = None,
+    chapter_id: str | None = None,
+    conversation_id: str | None = None,
 ) -> tuple[list[dict], dict]:
     """组装章节生成的 messages。
 
@@ -151,7 +164,10 @@ def build_chapter_messages(
     # ---------- 1. 先识别本章可能涉及的实体 ----------
     # 用「本章要点 + 最近商讨」当线索，命中的角色/势力/地点会拿到全量注入
     hint_text = prompt_hint or ""
-    disc_block = layers.layer_discussion(db, project_id) if from_discussion else None
+    disc_block = (
+        layers.layer_discussion(db, project_id, chapter_id=chapter_id, conversation_id=conversation_id)
+        if from_discussion else None
+    )
     mention_src = [hint_text]
     if disc_block:
         mention_src.append(disc_block.content)
@@ -197,6 +213,13 @@ def build_chapter_messages(
     task_lines.append(
         f"目标字数 {word_range.get('min', 3000)}~{word_range.get('max', 5000)} 字，"
         "宁可写透一个场景，也不要为凑字数注水。"
+    )
+    task_lines.append(
+        "写作纪律（违反即作废）：① 不得原文重复任何≥12字的句子/动作/心理描写；"
+        "② 对话须每段推进新信息，禁止用同一套问答反复拉扯；"
+        "③ 每 2~3 段必须推进剧情或揭示新事实，不得原地打转；"
+        "④ 必须正确使用中文标点并自然分段，单段不超过 4 行，对话与动作交替时及时换段；"
+        "⑤ 正文须为纯中文，严禁夹带英文单词/拉丁字母（如 reasonable、possible 之类），否则作废。"
     )
     _add(_mk("task", "【本章任务】", "\n".join(task_lines),
              P_CRITICAL, order=90, required=True))

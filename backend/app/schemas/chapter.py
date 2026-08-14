@@ -5,6 +5,8 @@ from datetime import datetime
 
 
 class GenerateRequest(BaseModel):
+    model_config = {"protected_namespaces": ()}  # 允许 model_id 字段，消除 Pydantic 命名空间冲突警告
+
     chapter_no: int = Field(..., ge=1)
     prompt_hint: Optional[str] = None
     from_discussion: bool = True
@@ -13,6 +15,11 @@ class GenerateRequest(BaseModel):
     temperature: float = Field(0.4, ge=0, le=1)
     enable_thinking: Optional[bool] = None
     article_id: Optional[str] = None          # 4 级结构：生成章节时必属某篇（可空兼容旧调用）
+    model_id: Optional[str] = None            # 前端指定模型 ID；不传则 fallback 到默认模型
+    title: Optional[str] = None               # 用户填写的章节标题；为空则后端按序号兜底
+    chapter_id: Optional[str] = None          # 重新生成目标章节 ID（非空=覆盖该章，不新建）
+    thread_chapter_id: Optional[str] = None   # 当前所在对话线程（章）；用于打包商讨 + 走向建议归位
+    thread_conversation_id: Optional[str] = None  # 当前所在对话线程（会话）；同上
 
 
 class ChapterBase(BaseModel):
@@ -32,6 +39,7 @@ class ChapterUpdate(BaseModel):
     title: Optional[str] = None
     content: Optional[str] = None
     note: Optional[str] = None
+    word_count: Optional[int] = None
 
 
 class Chapter(ChapterBase):

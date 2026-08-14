@@ -202,6 +202,81 @@ def _scan_adverb_stacking(text: str) -> list[dict]:
     return issues
 
 
+def _scan_english_mix(text: str, occupied: list[tuple[int, int]]) -> list[dict]:
+    """检测中文正文里夹带的英文单词（≥3 个连续拉丁字母）。
+
+    强双语推理模型（如 GLM-5.2）在长内心独白段容易中英混写（冒出 reasonable 之类）。
+    只报、不改写；severity=medium，让作者生成后一眼看到并手动替换。
+    """
+    issues: list[dict] = []
+    for m in re.finditer(r"[A-Za-z]{3,}", text):
+        span = (m.start(), m.end())
+        if _overlaps(span, occupied):
+            continue
+        occupied.append(span)
+        word = m.group(0)
+        issues.append({
+            "rule_id": "lang.english",
+            "name": "英文夹杂",
+            "category": "语言",
+            "severity": "medium",
+            "matched": word[:30],
+            "start": span[0],
+            "end": span[1],
+            "line": _line_of(text, span[0]),
+            "context": _context_of(text, span[0], span[1]),
+            "advice": f"用中文表达替换英文单词「{word}」，正文须为纯中文叙事。",
+        })
+    return issues
+
+
+def _scan_no_punct_run(text: str, occupied: list[tuple[int, int]]) -> list[dict]:
+    """检测超过阈值、且不含任何中文标点的超长连续片段（含无标点长句 / 整段意识流）。
+
+    以中文标点（。！？；，、…—：""''（）等）或换行为断点；断点之间若超过 _NO_PUNCT_THRESHOLD
+    字仍无任何标点，即判为「超长无标点」，生成后报警，提醒作者断句加标点。
+    """
+    issues: list[dict] = []
+    punct = set("。！？；，、…—：“”‘’（）《》〈〉「」『』")
+    threshold = 60
+    run_start = -1
+    run_len = 0
+    n = len(text)
+
+    def _flush(end: int):
+        nonlocal run_start, run_len
+        if run_len > threshold and run_start >= 0:
+            span = (run_start, end)
+            if not _overlaps(span, occupied):
+                occupied.append(span)
+                issues.append({
+                    "rule_id": "punct.no_punct_run",
+                    "name": "超长无标点",
+                    "category": "标点",
+                    "severity": "medium",
+                    "matched": text[run_start:end][:40],
+                    "start": run_start,
+                    "end": end,
+                    "line": _line_of(text, run_start),
+                    "context": _context_of(text, run_start, end),
+                    "advice": f"此处连续 {run_len} 字无任何标点，必须按句意断句并加逗号/句号。",
+                })
+        run_start = -1
+        run_len = 0
+
+    for i, ch in enumerate(text):
+        if ch in punct or ch == "\n":
+            if run_len > 0:
+                _flush(i)
+        else:
+            if run_len == 0:
+                run_start = i
+            run_len += 1
+    if run_len > 0:
+        _flush(n)
+    return issues
+
+
 def _grade(score: float) -> str:
     if score >= 90:
         return "自然"
@@ -234,6 +309,10 @@ def scan(text: str, scene: str = "novel") -> dict[str, Any]:
     issues += _scan_words(text, scene, occupied)
     # 段落级检测独立统计，不参与区间抑制
     issues += _scan_adverb_stacking(text)
+    # 语言与标点：英文夹杂 / 超长无标点（只报警不改写）。
+    # 注意：二者用各自独立的 occupied，互不抑制——同一段既夹英文又无标点时应同时报警。
+    issues += _scan_english_mix(text, [])
+    issues += _scan_no_punct_run(text, [])
 
     issues.sort(key=lambda x: x["start"])
 

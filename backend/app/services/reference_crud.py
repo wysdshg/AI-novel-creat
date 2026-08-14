@@ -112,6 +112,18 @@ def delete_reference(db: Session, project_id: str, doc_id: str) -> bool:
     return True
 
 
+def update_reference(db: Session, project_id: str, doc_id: str, filename: str) -> ReferenceDoc | None:
+    o = db.query(ReferenceDocORM).filter_by(project_id=project_id, id=doc_id).first()
+    if o is None:
+        return None
+    o.filename = filename
+    o.tags = auto_tags(filename, o.content_text or "")
+    o.updated_at = _now()
+    db.commit()
+    db.refresh(o)
+    return _to_full(o)
+
+
 def get_references_corpus(db: Session, project_id: str, article_id: str | None = None, limit: int = 10) -> str:
     """检索本作品参考文档，拼为一段上下文文本，供 AI 生成时读取。
 

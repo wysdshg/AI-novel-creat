@@ -38,6 +38,12 @@
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="分类 / 优先级" width="150">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain">{{ row.category || '通用' }}</el-tag>
+            <span class="sk-pri">{{ row.priority ?? 100 }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="启用" width="80">
           <template #default="{ row }">
             <el-tag v-if="row.enabled" type="success" size="small" effect="plain">已启用</el-tag>
@@ -88,6 +94,16 @@
           </el-select>
           <span class="sk-hint">all=全部阶段；也可单独指定 chapter / discussion / memory / parse</span>
         </el-form-item>
+        <el-form-item label="分类">
+          <el-select v-model="form.category" style="width: 200px">
+            <el-option v-for="c in categories" :key="c.v" :label="c.l" :value="c.v" />
+          </el-select>
+          <span class="sk-hint">文风/结构/视角/口吻=互斥（同类只留优先级最高）；通用/禁忌=可叠加</span>
+        </el-form-item>
+        <el-form-item label="优先级">
+          <el-input-number v-model="form.priority" :min="0" :max="999" :step="10" />
+          <span class="sk-hint">数值越大越优先；拼接时高优先级更靠近指令末尾（更有效）</span>
+        </el-form-item>
         <el-form-item label="提示词正文">
           <el-input
             v-model="form.prompt_body"
@@ -132,6 +148,16 @@ const triggerTag = (v) => ({
   all: 'success', discussion: 'info', chapter: 'warning', memory: 'danger', parse: '',
 }[v] || '')
 
+// 调度分类：互斥类（文风/结构/视角/口吻）同类只留优先级最高的；通用/禁忌可叠加
+const categories = [
+  { v: '通用', l: '通用（可叠加）' },
+  { v: '禁忌', l: '禁忌（可叠加）' },
+  { v: '文风', l: '文风（互斥）' },
+  { v: '结构', l: '结构（互斥）' },
+  { v: '视角', l: '视角（互斥）' },
+  { v: '口吻', l: '口吻（互斥）' },
+]
+
 const keyword = ref('')
 const trigger = ref('')
 const enabledOnly = ref(false)
@@ -147,6 +173,8 @@ const emptyForm = () => ({
   trigger: 'all',
   enabled: true,
   tags: [],
+  category: '通用',
+  priority: 100,
 })
 const form = reactive(emptyForm())
 const tagsText = computed({
@@ -185,6 +213,8 @@ function openEdit(row) {
     trigger: row.trigger || 'all',
     enabled: !!row.enabled,
     tags: Array.isArray(row.tags) ? [...row.tags] : [],
+    category: row.category || '通用',
+    priority: row.priority ?? 100,
   })
   editingId.value = row.id
   dialogVisible.value = true
@@ -243,6 +273,7 @@ onMounted(load)
 .sk-toolbar-actions { display: flex; gap: 10px; align-items: center; }
 .sk-card { margin-bottom: 14px; }
 .sk-tag { margin-right: 4px; }
+.sk-pri { margin-left: 6px; font-size: 12px; color: #909399; }
 .sk-hint { font-size: 12px; color: #909399; margin-left: 12px; }
 .muted { color: #c0c4cc; }
 </style>

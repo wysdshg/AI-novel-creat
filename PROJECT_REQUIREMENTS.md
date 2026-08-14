@@ -80,13 +80,13 @@ E:\AI小说创作\
 
 ### 后端
 ```bash
-# 受管虚拟环境（已装依赖），不是 backend/.venv
-PYTHON="C:/Users/w3013/.workbuddy/binaries/python/envs/default/Scripts/python.exe"
+# 项目自带虚拟环境（已装依赖），不是受管环境，也不是 backend/.venv
+PYTHON="E:/AI小说创作/.venv/Scripts/python.exe"
 cd E:/AI小说创作/backend
 $PYTHON -m uvicorn main:app --host 127.0.0.1 --port 8000
 # 文档： http://localhost:8000/docs
 ```
-> ⚠️ `dev.py` 虽默认 `reload=True`，但本环境宿主 uvicorn 对共享盘编辑**不可靠触发**重载；改后端后仍需在宿主侧手动杀 8000 端口进程再重启。SQLite 无迁移，新增 ORM 列靠 `init_db` 自动 `ALTER TABLE ADD COLUMN`（仅新增列）。
+> ⚠️ `dev.py` 默认 `reload=False`（源码 `DEV_RELOAD` 默认 `"0"`，须 `DEV_RELOAD=1` 才开），本环境宿主 uvicorn 对共享盘编辑**不可靠触发**重载；改后端后仍需在宿主侧手动杀 8000 端口进程再重启。SQLite 无迁移，新增 ORM 列靠 `init_db` 自动 `ALTER TABLE ADD COLUMN`（仅新增列）。
 
 ### 前端
 ```bash

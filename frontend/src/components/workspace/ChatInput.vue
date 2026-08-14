@@ -10,6 +10,11 @@
         effect="plain"
         @click="onQuick(q)"
       >{{ q }}</el-tag>
+      <el-button
+        class="ci-namegen"
+        size="small"
+        @click="nameGenVisible = true"
+      >💡 起名</el-button>
     </div>
 
     <el-mention
@@ -80,6 +85,11 @@
       :article-id="activeArticleId"
       :enable-thinking="enableThinking"
     />
+
+    <NameGeneratorDialog
+      v-model="nameGenVisible"
+      :project-id="store.currentNovelId"
+    />
   </div>
 </template>
 
@@ -91,16 +101,18 @@ import { characterApi, factionApi, commandApi } from '@/api/database'
 import { generateChapterStream } from '@/api/chapter'
 import { parseSlashCommands } from '@/utils/slash'
 import GenerateChapterDialog from './GenerateChapterDialog.vue'
+import NameGeneratorDialog from './NameGeneratorDialog.vue'
 
 const store = useProjectStore()
 const text = ref('')
 const genVisible = ref(false)
+const nameGenVisible = ref(false)
 const mentionsRef = ref(null)
 const characters = ref([])
 const factions = ref([])
 // 思考开关：默认关闭（回复更快、更省 token）；开启后会在回复下方展示模型推理过程。
-// 注意：聊天与「生成章节」共用此开关，但 Ollama 原生适配器始终返回干净正文，
-// 因此章节正文不受其影响（仅在聊天界面决定是否展示思考过程）。
+// 注：章节生成已由后端强制开思考（云端推理模型关思考写长文必复读，见 chapter.py
+// NA_CHAPTER_FORCE_THINKING，本地 ollama 除外），此开关只影响聊天展示与本地 ollama。
 const enableThinking = ref(false)
 // 当前会话中最近被 @ 的条目 ID（按时间先后放入；越后放表示越近使用）
 const recentlyMentionedIds = ref([])
@@ -281,10 +293,20 @@ async function runChapterCommand(act) {
   const msg = { role: 'ai', content: `（开始生成第${act.chapterNo}章…）\n`, streaming: true }
   store.discussionMessages.push(msg)
   let full = ''
+  // 当前所在对话线程（章优先，否则会话）：打包商讨 + 走向建议归位到同一对话框
+  const threadChapterId = store.currentChapterId || null
+  const threadConversationId = store.currentChapterId ? null : (store.currentConversationId || null)
   try {
     await generateChapterStream(
       store.currentNovelId,
-      { chapter_no: act.chapterNo, prompt_hint: act.hint, article_id: activeArticleId.value },
+      {
+        chapter_no: act.chapterNo,
+        prompt_hint: act.hint,
+        article_id: activeArticleId.value,
+        from_discussion: true,
+        thread_chapter_id: threadChapterId,
+        thread_conversation_id: threadConversationId,
+      },
       (ev, data) => {
         if (ev === 'chunk' && data?.text) {
           full += data.text
@@ -330,6 +352,11 @@ const onClear = async () => {
 }
 .ci-quick-label { font-size: 12px; color: #909399; }
 .ci-chip { cursor: pointer; }
+.ci-namegen {
+  margin-left: 4px;
+  border-style: dashed;
+  color: #606266;
+}
 .ci-actions {
   display: flex;
   align-items: center;

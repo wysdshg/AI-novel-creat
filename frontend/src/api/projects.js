@@ -10,4 +10,6 @@ export const projectApi = {
   // 小说设定库管理
   getSettings: (id) => http.get(`/projects/${id}/settings`),
   updateSettings: (id, settingIds) => http.put(`/projects/${id}/settings`, { setting_ids: settingIds }),
+  // 手动刷新整本概览（篇/卷/小说三级 LLM 压缩）
+  aggregateOverview: (id, data) => http.post(`/projects/${id}/aggregate-overview`, data || {}),
 }

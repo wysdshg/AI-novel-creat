@@ -16,10 +16,13 @@ import uvicorn
 if __name__ == "__main__":
     # 默认关闭 reload；仅当显式 DEV_RELOAD=1 时才开启（本机调试用，沙箱勿开）。
     reload = os.environ.get("DEV_RELOAD", "0") == "1"
-    uvicorn.run(
-        "main:app",
+    run_kwargs = dict(
         host=os.environ.get("HOST", "127.0.0.1"),
         port=int(os.environ.get("PORT", "8000")),
         reload=reload,
-        reload_dirs=["app", "main.py"],
     )
+    # reload_dirs 仅在开启热重启时传入，否则会触发 uvicorn 的
+    # "will not reload as not all conditions are met" 警告。
+    if reload:
+        run_kwargs["reload_dirs"] = ["app", "main.py"]
+    uvicorn.run("main:app", **run_kwargs)

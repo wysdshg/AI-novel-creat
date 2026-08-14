@@ -94,6 +94,14 @@ class OllamaNativeAdapter(BaseModelAdapter):
         if top_p is not None:
             opts["top_p"] = top_p
 
+        # 重复惩罚：专治小模型长文本复读循环（数值越大越抑制重复，1.0=关闭）。
+        # 章节生成长文本默认 1.3（chapter.py 按 vendor 注入 config）。
+        repeat_penalty = params.get("repeat_penalty")
+        if repeat_penalty is None:
+            repeat_penalty = self.config.get("repeat_penalty")
+        if repeat_penalty is not None:
+            opts["repeat_penalty"] = float(repeat_penalty)
+
         # 生成上限：Ollama 原生用 num_predict
         max_tokens = params.get("max_tokens")
         if max_tokens is None:
@@ -161,6 +169,48 @@ class OllamaNativeAdapter(BaseModelAdapter):
     def stream_thinking(self, messages, **params):
         """流式返回思考过程（think=true），用于「思考过程」展示。"""
         yield from self._stream(messages, think=True, **params)
+
+    def stream_with_thinking(self, messages, **params):
+        """流式返回「思考 + 正文」两种片段（供思考可见化展示）。
+
+        think=true 时 Ollama 原生响应可能同时携带 message.thinking 与 message.content：
+        - thinking 片段 → ("thinking", t)
+        - content 片段 → ("content", c)
+        """
+        url = self._chat_url()
+        payload = {
+            "model": self.config.get("model_name", ""),
+            "messages": messages,
+            "stream": True,
+            "think": True,
+            "cache_prompt": True,  # 稳定前缀 KV 复用
+            "options": self._opts(messages, **params),
+        }
+        req = _build_request(url, payload, self.config.get("api_key", ""))
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                for raw in resp:
+                    line = raw.decode("utf-8").strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    msg = obj.get("message") or {}
+                    t = msg.get("thinking") or ""
+                    if t:
+                        yield ("thinking", t)
+                    c = msg.get("content") or ""
+                    if c:
+                        yield ("content", c)
+                    if obj.get("done"):
+                        break
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "ignore")
+            yield ("content", f"\n[模型调用失败 status={e.code}: {detail[:200]}]")
+        except Exception as e:  # noqa: BLE001
+            yield ("content", f"\n[模型调用异常: {str(e)[:200]}]")
 
     def chat(self, messages, **params) -> str:
         url = self._chat_url()

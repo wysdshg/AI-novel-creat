@@ -11,6 +11,7 @@ SSE 事件序列：
 import json
 import os
 import re
+import threading
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -19,13 +20,14 @@ from sqlalchemy.orm import Session
 from app.schemas.chapter import GenerateRequest, ChapterCreate, ChapterUpdate
 from app.core.response import ok
 from app.core.database import get_session
+from app.core import database as _db
 from app.core.context import build_chapter_messages
 from app.services import (
     app_config, article_crud, chapter_crud, humanizer, ingestion, model_crud,
     reference_crud,
 )
 from app.core.gateway.registry import get_adapter
-from app.models.orm import ReferenceDocORM
+from app.models.orm import ReferenceDocORM, ChapterORM, ModelConfigORM
 
 router = APIRouter(tags=["章节生成"])
 
@@ -49,19 +51,22 @@ class _RepetitionGuard:
     """
 
     _WINDOW_SIZE = 600       # 滑动窗口大小（字符）
-    _THRESHOLD = 0.55        # 重叠率阈值
-    _MIN_OVERLAP_LEN = 40     # 最小重叠长度（短巧合不算）
+    _THRESHOLD = 0.55        # 近窗重叠率阈值
+    _MIN_OVERLAP_LEN = 40    # 最小重叠长度（短巧合不算）
+    _SENT_MIN_LEN = 12       # 句子级检测：短于该长度不计数（短句是风格口癖，不算复读）
+    _SENT_MAX_COUNT = 3      # 同一完整句出现 3 次 → 判定循环（按用户实测反馈回调到 3）
 
     def __init__(self):
         self._buf = ""               # 已累积的全部正文
         self._triggered = False      # 是否已触发循环截断
-        self._stop_yield_after = ""  # 触发后仍允许输出的尾部（收束当前句子）
+        self._pending = ""           # 跨 chunk 拼接的未收尾句子
+        self._sent_count = {}        # 完整句子 → 出现次数（句子级复读检测）
 
     def feed(self, chunk: str) -> bool:
         """传入新 chunk，返回是否应该继续 yield 给下游。
 
         返回 True = 正常，可以 yield；
-        返回 False = 检测到循环，不应再 yield 新内容。
+        返回 False = 检测到循环，调用方必须立即中断上游生成（不能继续消费迭代器烧 token）。
         """
         if self._triggered:
             return False
@@ -70,20 +75,33 @@ class _RepetitionGuard:
             return True
 
         self._buf += chunk
-        # 只在累积超过窗口大小时才检测（太短时误判率高）
-        if len(self._buf) < self._WINDOW_SIZE:
-            return True
 
-        # 取最近窗口 + 当前新增部分做重叠检测
-        recent = self._buf[-self._WINDOW_SIZE:]
-        overlap_len = self._longest_overlap(recent)
-        if overlap_len >= self._MIN_OVERLAP_LEN:
-            overlap_ratio = overlap_len / len(chunk) if chunk else 0
-            if overlap_ratio >= self._THRESHOLD:
-                self._triggered = True
-                # 允许当前 chunk 的前半部分通过（收束句子），后半截断
-                self._stop_yield_after = chunk[:max(1, len(chunk) // 3)]
-                return False
+        # —— 第一层：近窗重叠检测（小模型「整段复读」：新内容与近期窗口高度重叠）——
+        if len(self._buf) >= self._WINDOW_SIZE:
+            recent = self._buf[-self._WINDOW_SIZE:]
+            overlap_len = self._longest_overlap(recent)
+            if overlap_len >= self._MIN_OVERLAP_LEN:
+                overlap_ratio = overlap_len / len(chunk) if chunk else 0
+                if overlap_ratio >= self._THRESHOLD:
+                    self._triggered = True
+                    return False
+
+        # —— 第二层：句子级重复检测（GLM 等大模型的「对话句复读」——
+        # 同一句话变着花样重复，近窗重叠率低于阈值，第一层抓不到；
+        # 同一完整句（≥18 字）出现 3 次即判定循环）——
+        # 用 findall 提取「以句末标点结尾 + 尾随引号」的完整句，避免引号被留到下一段
+        # 导致同一句在不同 chunk 里 key 不一致（"……旧案。" vs "”……旧案。"）。
+        self._pending += chunk
+        sentences = re.findall(r"[^。！？…]*[。！？…][”’」』]*", self._pending)
+        if sentences:
+            self._pending = self._pending[len("".join(sentences)):]
+            for s in sentences:
+                s = s.strip()
+                if len(s) >= self._SENT_MIN_LEN:
+                    self._sent_count[s] = self._sent_count.get(s, 0) + 1
+                    if self._sent_count[s] >= self._SENT_MAX_COUNT:
+                        self._triggered = True
+                        return False
 
         return True
 
@@ -161,6 +179,32 @@ def _sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _content_only_stream(stream):
+    """把纯字符串流包装成 (kind, text) 元组流（kind 恒为 "content"）。
+
+    用 yield from 委托而非普通 for 循环：这样外层生成器 close() 时，
+    GeneratorExit 会确定性传播到上游 stream 的 with 块，HTTP 连接被立即关闭。
+    """
+    yield from (("content", d) for d in stream)
+
+
+def _next_chapter_no(db, project_id: str, article_id: str) -> int:
+    """本篇内下一个章节序号 = 该篇已有最大章号 + 1（而非小说全局递增）。
+
+    修复问题6：原来用 currentNovel.chapterCount+1（全局），导致序号跨篇混乱、
+    且每次生成都让全局计数 +1。这里改为按 article_id 局部计算，新建章才 +1。
+    """
+    try:
+        rows = (
+            db.query(ChapterORM.chapter_no)
+            .filter_by(project_id=project_id, article_id=article_id)
+            .all()
+        )
+        return (max((r[0] for r in rows if r[0] is not None), default=0)) + 1
+    except Exception:  # noqa: BLE001
+        return 1
+
+
 def _maybe_load_refs(db, project_id, messages, ctx_meta, default, body) -> tuple[list, dict]:
     """hybrid 模式：在 pick_relevant 已注入的基线上，按需把最相关的全局参考拉进来。
 
@@ -222,6 +266,47 @@ def _global_topup_ids(db, project_id, hint: str | None, exclude_ids: set[str], t
         return []
 
 
+def _background_ingest(project_id: str, chapter_id: str,
+                       push_chapter_id: str | None = None,
+                       push_conversation_id: str | None = None):
+    """后台线程执行写后摄取：独立 DB 会话，绝不碰请求级 session（线程隔离铁律）。
+
+    摄取完成只落库、不推 SSE（流已在 done 后关闭）；失败只打日志，不影响正文。
+    push_chapter_id / push_conversation_id：走向建议归位的对话线程（与生成时所在线程一致）。
+    """
+    try:
+        t_db = _db.SessionLocal()
+        try:
+            ch = t_db.query(ChapterORM).filter_by(id=chapter_id).first()
+            if ch is None:
+                print(f"[generate_chapter] 后台摄取：章节不存在 id={chapter_id}")
+                return
+            res = ingestion.ingest_chapter(
+                t_db, project_id, ch,
+                push_chapter_id=push_chapter_id,
+                push_conversation_id=push_conversation_id,
+            )
+            t_db.commit()  # 保险：个别 CRUD 未内嵌 commit
+            print(
+                f"[generate_chapter] 后台摄取完成: memory={res.get('memory_id')} "
+                f"fallback={res.get('fallback')} dirs={res.get('directions_pushed', 0)}"
+            )
+            # 概览向上聚合（问题1）：写回 Article/Volume/Project.summary，
+            # 概览页自动显示，不再「暂无 AI 概览」占位。失败不影响正文。
+            try:
+                agg = ingestion.aggregate_overview(t_db, project_id, ch.article_id, auto=True)
+                print(
+                    f"[generate_chapter] 概览聚合: 篇={agg.get('articles')} "
+                    f"卷={agg.get('volumes')} 小说={agg.get('project')}"
+                )
+            except Exception as e:  # noqa: BLE001
+                print(f"[generate_chapter] 概览聚合失败（不影响正文）: {type(e).__name__}: {str(e)[:150]}")
+        finally:
+            t_db.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"[generate_chapter] 后台摄取异常: {type(e).__name__}: {str(e)[:200]}")
+
+
 @router.post("/projects/{project_id}/chapters/generate")
 def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depends(get_session)):
     """单章生成（流式 SSE）。
@@ -245,6 +330,15 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
     except Exception:  # noqa: BLE001
         pass
 
+    # 章节序号：重新生成沿用原章号；新建按「本篇内最大序号 +1」计算（修复问题6）。
+    chapter_no = body.chapter_no
+    if body.chapter_id:
+        existing = chapter_crud.get_chapter(db, project_id, body.chapter_id)
+        if existing:
+            chapter_no = existing.chapter_no
+    elif body.article_id:
+        chapter_no = _next_chapter_no(db, project_id, body.article_id)
+
     try:
         messages, ctx_meta = build_chapter_messages(
             db, project_id,
@@ -255,6 +349,8 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
             word_range=body.word_range,
             trigger_foreshadow_ids=body.trigger_foreshadow_ids,
             from_discussion=body.from_discussion,
+            chapter_id=body.thread_chapter_id,
+            conversation_id=body.thread_conversation_id,
         )
     except Exception as e:  # noqa: BLE001
         # 上下文引擎挂了也得让作者能写字——退回最小提示词
@@ -265,8 +361,23 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
         ]
         ctx_meta = {"error": str(e)[:200]}
 
-    default = model_crud.get_default(db)
+    # 模型选择：优先用前端指定的 model_id（与对话流保持一致），否则 fallback 到默认模型
+    if body.model_id:
+        default = db.query(ModelConfigORM).filter_by(id=body.model_id).first()
+    else:
+        default = model_crud.get_default(db)
     use_model = default is not None and (default.status or "active") == "active"
+
+    # ---- 硬伤修复：章节生成长文任务，输出上限按目标字数换算，覆盖模型配置的 max_tokens ----
+    # 本地 qwen3.5:4b 配置 max_tokens=2048 → num_predict=2048，单章最多约 2600~3000 字就被硬截断，
+    # 永远写不满 word_range 目标。这里按目标字数换算成 token 上限（中文 1 字 ≈ 1.5 token，留余量），
+    # 并在 adapter.stream 调用处显式传入 max_tokens 覆盖配置（两个适配器都支持显式入参优先）。
+    # 上限 8192（约 5300 字）：云端推理模型开启思考后，reasoning token 也占 max_tokens 预算，
+    # 需留余量避免正文被截断；非思考场景模型会提前停止，不会真写到上限。可用环境变量覆盖。
+    _target_words = (body.word_range or {}).get("max", 5000) or 5000
+    _hard_cap = int(os.environ.get("NA_CHAPTER_MAX_TOKENS", "8192"))
+    chapter_max_tokens = min(int(_target_words * 1.2) + 256, _hard_cap)
+
     scan_enabled = bool(app_config.get(db, app_config.KEY_HUMANIZE_SCAN, True))
     ingest_enabled = bool(app_config.get(db, app_config.KEY_INGEST_ENABLED, True))
 
@@ -282,39 +393,124 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
         if ctx_meta.get("refs_loaded_extra"):
             yield _sse("refs", {"loaded": ctx_meta["refs_loaded_extra"]})
         content_parts = []
+        loop_stopped = False
         if use_model:
+            # 章节生成温度兜底 0.75：搜索与实践结论——低温(0.4)+无重复惩罚是小模型长文复读主因。
+            # 前端可显式传 temperature 覆盖（GenerateChapterDialog 已同步改为 0.75）。
+            _temp = body.temperature if body.temperature is not None else 0.75
             config = {
                 "api_base": default.api_base,
                 "api_key": default.api_key,
                 "model_name": default.model_name,
-                "temperature": default.temperature,
+                "temperature": _temp,
                 "top_p": default.top_p,
-                "max_tokens": default.max_tokens,
+                "max_tokens": chapter_max_tokens,
                 "enable_thinking": default.enable_thinking if body.enable_thinking is None else body.enable_thinking,
             }
+            # 重复惩罚：与「防复读·长文循环终结」SKILL（指令层）+ _RepetitionGuard（检测截断层）
+            # 组成三层防线，这里从解码参数层抑制重复：ollama 原生 repeat_penalty，
+            # 其余 OpenAI 兼容厂商用 frequency/presence_penalty。NA_CHAPTER_REP_PENALTY 可整体覆盖。
+            _vendor = (default.vendor or "").lower()
+            _model = (default.model_name or "").lower()
+            _api_base = (default.api_base or "").lower()
+            # 实测（2026-08-14 长输出 A/B 对照）：frequency/presence_penalty=0.4 在
+            # ModelScope Qwen3.5-122B-A10B 上会在生成中后段触发采样退化——正文变
+            # 无标点长段、人名退化成拼音（Biao Yuan Zhou / Suo You Wei）、夹英文词
+            # （torches）、重复 4 字词暴增；惩罚清零后同一管线（同提示词同温度）
+            # 输出完全正常（标点密度 0.167、最长无标点段 18、零拉丁字母）。
+            # → 该组合默认惩罚归零；其它厂商保留 0.4。env 可显式覆盖。
+            _modelscope_qwen35 = ("qwen3.5" in _model) and ("modelscope" in _api_base)
+            _rep_env = os.environ.get("NA_CHAPTER_REP_PENALTY")
+            if _rep_env:
+                _rep = float(_rep_env)
+            elif _vendor == "ollama":
+                _rep = 1.3
+            elif _modelscope_qwen35:
+                _rep = 0.0
+            else:
+                _rep = 0.4
+            if _vendor == "ollama":
+                config["repeat_penalty"] = _rep
+            else:
+                config["frequency_penalty"] = _rep
+                config["presence_penalty"] = float(
+                    os.environ.get("NA_CHAPTER_PRES_PENALTY", "0.0" if _modelscope_qwen35 else "0.4")
+                )
             want_thinking = body.enable_thinking if body.enable_thinking is not None else default.enable_thinking
+
+
+            _vendor = (default.vendor or "").lower()
+            _model = (default.model_name or "").lower()
+            _api_base = (default.api_base or "").lower()
+            # ModelScope 上的 Qwen3.5 开 thinking 后，流式下 reasoning_content 挤占 token 预算，
+            # 或把英文 reasoning 直接塞进 content（正文变无标点长段 + harmless/helpful 等推理词）。
+            # 强制关闭 thinking（用户显式开启也覆盖），保证正文 content 是干净中文叙事。
+            # 命中条件改为「model 含 qwen3.5 且 api_base 含 modelscope」，不限 vendor——
+            # 默认模型标的是 vendor="custom"，若仍要求 vendor=="qwen" 会被完全绕过。
+            _broken_thinking_combo = (
+                "qwen3.5" in _model
+                and "modelscope" in _api_base
+            )
+
+            # GLМ-5.2 等云端推理模型关思考写 3000+ 字长文必复读（实测两次，烧 token 到报爆）→
+            # 章节生成强制开思考。本地 ollama 除外：其 think=true 时正文为空（回答含在 thinking 里），
+            # 不适合章节正文。可用 NA_CHAPTER_FORCE_THINKING=0 关闭强制。
+            # 注意：broken combo 必须用 elif 排除，否则会被上面的强制逻辑重新打开 thinking。
+            if _broken_thinking_combo:
+                want_thinking = False
+            elif (
+                want_thinking is not True
+                and os.environ.get("NA_CHAPTER_FORCE_THINKING", "1") == "1"
+                and _vendor != "ollama"
+            ):
+                want_thinking = True
+
             try:
                 adapter = get_adapter(default.vendor, config)
                 guard = _RepetitionGuard()
-                for delta in adapter.stream(messages, temperature=body.temperature, enable_thinking=want_thinking):
-                    if guard.feed(delta):
-                        content_parts.append(delta)
-                        yield f"event: chunk\ndata: {json.dumps({'text': delta}, ensure_ascii=False)}\n\n"
-                    else:
-                        # 检测到重复循环：停止 yield，但继续消费迭代器
-                        content_parts.append(delta)  # 仍记录（用于后续去重）
-                        print(f"[generate_chapter] ⚠️ 检测到重复循环，停止输出（已生成 {len(guard.full_text)} 字符）")
-                        # 消费完剩余 chunk（避免连接异常）
-                        for _rest in adapter.stream(messages, temperature=body.temperature, enable_thinking=want_thinking):
-                            content_parts.append(_rest)
-                        break
+                loop_stopped = False
+                # 思考内容一律不接收、不透传：无论模型是否开 thinking，都只取 content 字段，
+                # reasoning_content 直接丢弃（避免 ModelScope Qwen3.5 等把英文分析塞进正文）。
+                # 思考开关仍发给模型（enable_thinking），让模型内部受益于思考；只是我们不再接收其思考输出。
+                gen = _content_only_stream(
+                    adapter.stream(
+                        messages,
+                        temperature=_temp,
+                        enable_thinking=want_thinking,
+                        max_tokens=chapter_max_tokens,
+                    )
+                )
+                try:
+                    for _, delta in gen:
+                        if guard.feed(delta):
+                            content_parts.append(delta)
+                            yield _sse("chunk", {"text": delta})
+                        else:
+                            # 检测到重复循环：立即中断，不再消费迭代器。
+                            # 旧实现「continue 消费剩余 chunk」会让模型继续生成、云端继续计费
+                            # 直到 token 报爆；现在 break 后由 finally 的 gen.close() 关闭底层
+                            # HTTP 连接 → 模型立即停止、计费停止。
+                            loop_stopped = True
+                            print(f"[generate_chapter] ⚠️ 检测到重复循环，中断生成（已生成 {len(guard.full_text)} 字符）")
+                            break
+                finally:
+                    # 无论正常结束 / 复读中断 / 客户端断开（GeneratorExit），都关闭上游生成器，
+                    # 确保底层 HTTP 连接释放，模型不会继续空转计费。
+                    try:
+                        gen.close()
+                    except Exception:  # noqa: BLE001
+                        pass
             except Exception as e:  # noqa: BLE001
                 content_parts.append(f"\n[模型调用失败，已降级为占位：{str(e)[:200]}]")
-                yield f"event: chunk\ndata: {json.dumps({'text': content_parts[-1]}, ensure_ascii=False)}\n\n"
+                yield _sse("chunk", {"text": content_parts[-1]})
         else:
             placeholder = "[章节正文占位 — 未配置可用模型，请在「模型配置」中添加并设为默认]"
             content_parts.append(placeholder)
             yield f"event: chunk\ndata: {json.dumps({'text': placeholder}, ensure_ascii=False)}\n\n"
+
+        if loop_stopped:
+            # 复读检测截断：给前端明确信号（否则看起来像"卡住"）
+            yield _sse("stopped", {"reason": "detected_repetition", "chars": len("".join(content_parts))})
 
         full = "".join(content_parts)
 
@@ -338,28 +534,63 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
             yield _sse("validate", {"issues": []})
 
         # 落库（4 级结构下 article_id 从 body 透传）
-        chapter = chapter_crud.create_chapter(
-            db,
-            project_id,
-            ChapterCreate(
-                chapter_no=chapter_no,
-                title=f"第{chapter_no}章",
-                content=full,
-                word_count=len(full),
-                article_id=body.article_id,
-            ),
-        )
+        # 重新生成（body.chapter_id 非空）→ 覆盖原章（保持章号，不新建、不递增计数）；
+        # 否则新建，标题优先用用户输入、再用「第N章」兜底。
+        if body.chapter_id:
+            _upd = {"content": full, "word_count": len(full)}
+            if body.title:
+                _upd["title"] = body.title
+            chapter = chapter_crud.update_chapter(
+                db, project_id, body.chapter_id, ChapterUpdate(**_upd),
+            )
+            if chapter is None:
+                # 目标章不存在（被删等异常）→ 退回新建
+                chapter = chapter_crud.create_chapter(
+                    db, project_id,
+                    ChapterCreate(
+                        chapter_no=chapter_no,
+                        title=body.title or f"第{chapter_no}章",
+                        content=full,
+                        word_count=len(full),
+                        article_id=body.article_id,
+                    ),
+                )
+        else:
+            chapter = chapter_crud.create_chapter(
+                db,
+                project_id,
+                ChapterCreate(
+                    chapter_no=chapter_no,
+                    title=body.title or f"第{chapter_no}章",
+                    content=full,
+                    word_count=len(full),
+                    article_id=body.article_id,
+                ),
+            )
         yield _sse("saved", {"chapter_id": chapter.id, "word_count": chapter.word_count})
 
-        # 写后摄取：抽记忆 → 写篇章摘要 → 推走向卡片。慢一点没关系，正文已经到前端了
+        # 写后摄取：挪到后台线程（独立 DB 会话），不阻塞 SSE。
+        # done 立即发出——正文已落库、前端马上显示完成；摄取结果（记忆/摘要/走向）
+        # 异步落库，下一章自然读到，作者无需干等。
         if ingest_enabled and use_model:
             try:
-                yield _sse("ingest_start", {"chapter_id": chapter.id})
-                ing = ingestion.ingest_chapter(db, project_id, chapter)
-                yield _sse("ingest", ing)
+                # 走向建议归位（问题2）：推回到「被生成的这一章」自己的对话线程，
+                # 而不是「生成时所在线程」(body.thread_chapter_id)。
+                # 旧逻辑用 thread_chapter_id 会导致两类错位：
+                #   - 从篇/卷视图（无 currentChapter）新建章 → 落到小说级默认线程（用户看到的「第一篇」）；
+                #   - 从某章工作区新建「另一章」→ 落到源章线程，而非被生成章。
+                # 统一改成 chapter.id（被生成章），保证「第N章的走向出现在第N章的对话框」。
+                # 注意：push_conversation_id 必须传 None——conversation_id 优先级高于
+                # chapter_id，传了会把卡片塞进某个会话线程而非章线程。
+                # （INPUT 侧的商讨打包仍用 body.thread_chapter_id，不受影响。）
+                threading.Thread(
+                    target=_background_ingest,
+                    args=(project_id, chapter.id, chapter.id, None),
+                    daemon=True,
+                ).start()
+                yield _sse("ingest_start", {"chapter_id": chapter.id, "async": True})
             except Exception as e:  # noqa: BLE001
-                print(f"[generate_chapter] 写后摄取失败: {e}")
-                yield _sse("ingest", {"error": str(e)[:200]})
+                print(f"[generate_chapter] 启动后台摄取失败: {e}")
 
         yield _sse("done", {"chapter_id": chapter.id, "word_count": chapter.word_count})
 

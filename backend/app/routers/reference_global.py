@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_session
 from app.core.response import ok
-from app.schemas.reference import ReferenceDocCreate, ReferenceDoc, ReferenceDocSummary, ReferenceCatalogItem
+from app.schemas.reference import ReferenceDocCreate, ReferenceDoc, ReferenceDocSummary, ReferenceDocUpdate, ReferenceCatalogItem
 from app.services import reference_crud as svc
 
 router = APIRouter(tags=["参考资料(全局)"])
@@ -54,6 +54,14 @@ def delete_global(doc_id: str, db: Session = Depends(get_session)):
     if not svc.delete_reference(db, GLOBAL, doc_id):
         raise HTTPException(status_code=404, detail="全局参考资料不存在")
     return ok({"deleted": doc_id})
+
+
+@router.put("/references/global/{doc_id}", summary="重命名全局参考资料")
+def update_global(doc_id: str, body: ReferenceDocUpdate, db: Session = Depends(get_session)):
+    doc = svc.update_reference(db, GLOBAL, doc_id, body.filename)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="全局参考资料不存在")
+    return ok(doc.model_dump(mode="json"))
 
 
 @router.post("/projects/{project_id}/references/import-global", summary="将选中的全局参考资料复制进小说")

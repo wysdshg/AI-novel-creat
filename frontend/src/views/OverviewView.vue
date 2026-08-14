@@ -3,6 +3,16 @@
     <el-empty v-if="!novel" description="请先在左侧选择或新建一本小说" />
 
     <template v-else>
+      <div class="ov-toolbar">
+        <el-button
+          type="primary"
+          :icon="Refresh"
+          :loading="refreshing"
+          @click="refreshOverview"
+        >刷新概览</el-button>
+        <span class="ov-toolbar-hint">自动聚合已在每次生成章节后运行；此按钮用 LLM 把整本概览精修为连贯压缩版（卷/小说级）。</span>
+      </div>
+
       <!-- 小说级 -->
       <section class="ov-block ov-novel">
         <div class="ov-block-head">
@@ -86,7 +96,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Edit, Files, Notebook, Collection } from '@element-plus/icons-vue'
+import { Edit, Files, Notebook, Collection, Refresh } from '@element-plus/icons-vue'
 import { useProjectStore } from '@/store/project'
 import { projectApi } from '@/api/projects'
 import { volumeApi } from '@/api/volume'
@@ -95,6 +105,23 @@ import { articleApi } from '@/api/article'
 const store = useProjectStore()
 const novel = computed(() => store.currentNovel)
 const volumes = computed(() => store.structure.volumes || [])
+const refreshing = ref(false)
+
+async function refreshOverview() {
+  const projectId = store.currentNovelId
+  if (!projectId) return
+  refreshing.value = true
+  try {
+    await projectApi.aggregateOverview(projectId, { model_id: store.currentModelId || undefined })
+    // 重新拉取：novel.summary 来自 novels 列表，volumes 摘要来自 structure
+    await Promise.all([store.loadNovels(), store.loadStructure(projectId)])
+    ElMessage.success('概览已刷新')
+  } catch (e) {
+    ElMessage.error('刷新失败：' + (e?.message || '未知错误'))
+  } finally {
+    refreshing.value = false
+  }
+}
 
 // —— 内联编辑状态（同一时刻仅一处编辑）——
 const editing = ref(null)   // { kind: 'novel'|'volume'|'article', id }
@@ -148,6 +175,8 @@ async function saveEdit() {
 
 <style scoped>
 .ov { padding: 4px; max-width: 920px; }
+.ov-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+.ov-toolbar-hint { font-size: 12px; color: #909399; line-height: 1.5; }
 .ov-block {
   background: #fff;
   border: 1px solid var(--el-border-color-lighter);

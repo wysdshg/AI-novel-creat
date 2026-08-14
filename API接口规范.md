@@ -11,7 +11,7 @@
 
 本文件是**接口契约总纲**。开发**必须**遵守本文档定义的路径、方法、入参、出参与错误码。
 
-> ⚠️ **重要：本文档 v0.1 曾称"所有接口均为桩"。现已过时。** 截至 v0.2，作品/参考文档/角色/势力/地点 5 个模块已落地真实持久化；章节生成、对话、模型网关、伏笔、记忆、走向、模板仍为桩。**每个章节标题后标注 [✅真实] / [⚠️桩]** 表示当前实现状态，详见 §0.1 状态矩阵。
+> ⚠️ **重要：本文档 v0.1 曾称"所有接口均为桩"。现已过时。** 截至 v0.3，作品/参考文档/角色/势力/地点/技能/设定库/全局SKILL/工作流/章节生成/剧情商讨/模型网关/记忆压缩/指令入库均已落地真实持久化；仅**设定校验、套路模板、伏笔 CRUD、走向推荐(POST)仍为桩**。每个章节标题后标注 [✅真实] / [⚠️桩] / [🟡部分] 表示当前实现状态，详见 §0.1 状态矩阵。
 
 ### 0.1 实现状态矩阵（真实 / 桩）
 
@@ -24,13 +24,13 @@
 | §2.4 | 势力 Factions | ✅ 真实 |
 | §2.4b | 地点 Locations | ✅ 真实（含 geometry/plane + geo-relations） |
 | §2.6 | 设定校验 validate | ⚠️ 桩 |
-| §2.7 | 指令入库 command | ⚠️ 桩 |
+| §2.7 | 指令入库 command | ✅ 真实（自然语言抽取角色/势力/地点/关系并 upsert 落库） |
 | §3.1 | 剧情商讨 Discussion | ✅ 真实（持久化） |
-| §3.2 | 章节生成 Chapter | ⚠️ 桩（非流式，SSE 未实现） |
+| §3.2 | 章节生成 Chapter | ✅ 真实（SSE 流式，消费默认模型 / Ollama 原生适配器产出） |
 | §4 | 模型网关 Model | ✅ 真实 |
-| §5 | 记忆压缩 Memory | ⚠️ 桩 |
+| §5 | 记忆压缩 Memory | ✅ 真实（ingest / compress / summary / stages / events / pending-entities 全落地） |
 | §6 | 伏笔 Foreshadow | ⚠️ 桩 |
-| §7 | 走向推荐 Direction | ⚠️ 桩 |
+| §7 | 走向推荐 Direction | 🟡 部分（GET 列表真实；POST 推荐仍桩，靠写后摄取推卡片） |
 | §8 | 套路模板 Template | ⚠️ 桩 |
 | §11 | 参考文档 Reference Doc | ✅ 真实 |
 | §12 | 设定库 Setting | ✅ 真实（本轮新增） |
@@ -46,7 +46,7 @@
 
 
 
-### 0.1 基础 URL
+### 0.8 基础 URL
 
 | 环境 | Base URL |
 | --- | --- |
@@ -285,9 +285,9 @@ polygon(JSON|null)                                # 不规则多边形顶点 [[x
 
 ---
 
-## 3. 模块 2/3：章节生成控制器 + 剧情商讨缓存（需求 2、3、6）[⚠️桩]
+## 3. 模块 2/3：章节生成控制器 + 剧情商讨缓存（需求 2、3、6）[✅真实]
 
-> 实现状态：当前 `routers/chapter.py` 与 `routers/discussion.py` 均为占位返回（占位 id、空正文、内存态不持久化）。§3.2 设计的 **SSE 流式**目前**未实现**，章节生成为同步占位。下一任需把生成真正接到模型网关并落库（见 README §8）。
+> 实现状态：**章节生成（`routers/chapter.py`）与剧情商讨（`routers/discussion.py`）均已真实落地**——章节生成为 **SSE 流式**（`StreamingResponse`，消费默认模型 / Ollama 原生适配器产出正文），商讨对话持久化到 DB（含 `/discussion/chat` 与 `/discussion/global-chat`）。以下端点为真实可用状态；后续扩展方向见 README §8。
 
 ### 3.1 剧情商讨会话缓存池（需求 6）
 
@@ -297,6 +297,8 @@ polygon(JSON|null)                                # 不规则多边形顶点 [[x
 | POST | `/discussion/messages` | 追加一条商讨消息（闲聊商讨，仅缓存不生成） |
 | DELETE | `/discussion` | 清空临时商讨缓存（章节生成完成后归档并清空） |
 | POST | `/discussion/archive` | 将当前商讨草稿归档为指定章节备注 |
+| POST | `/discussion/chat` | 真实流式商讨回复（SSE，对话级持久化） |
+| POST | `/discussion/global-chat` | 未选小说时的全局对话（全局线程 `__global__` 持久化） |
 
 **消息 Schema**：`id, role(user|assistant), content, created_at`
 
@@ -323,7 +325,7 @@ polygon(JSON|null)                                # 不规则多边形顶点 [[x
 }
 ```
 
-**硬性生成规则（后端须遵守，脚手架仅占位）**：
+**硬性生成规则（后端须遵守，已真实落地）**：
 1. 单次仅生成单章，字数锁定 3000–5000，输出后自动裁剪/补写；
 2. 三层防发散：Prompt 固定模板（禁用套话/排比/万能描写）+ 流式监控截断 + 后置文风过滤词库；
 3. 严格遵循用户要求、资料库设定、商讨剧情；不私自加新角色/技能/关系（设定锁死）。
@@ -390,10 +392,11 @@ data: {"chapter_id":"...","word_count":4180}
 
 ### 4.4 适配器扩展接口（关键扩展点）
 
-后端 `app/core/gateway/` 下定义抽象基类 `BaseModelAdapter`，已实现两个真实适配器（**仅用标准库 urllib，零第三方依赖**）：
+后端 `app/core/gateway/` 下定义抽象基类 `BaseModelAdapter`，已实现 **三个**真实适配器（**仅用标准库 urllib，零第三方依赖**）：
 
 - `adapters/openai_compat.py` — `OpenAICompatibleAdapter`：覆盖 `openai / deepseek / qwen / kimi / ollama / custom / ernie / spark`（OpenAI 兼容 `/chat/completions` 端点；用户需在 `api_base` 指向其兼容地址）。
 - `adapters/claude.py` — `ClaudeAdapter`：Anthropic `/v1/messages` 端点（system 顶层 + SSE `content_block_delta`）。
+- `adapters/ollama_native.py` — `OllamaNativeAdapter`：Ollama 原生 `/api/chat`，支持 `num_predict` / 动态 `num_ctx`（`_fit_num_ctx`）/ `think` 开关，**章节生成默认走此适配器**。
 
 ```python
 class BaseModelAdapter:
@@ -634,7 +637,7 @@ class BaseModelAdapter:
 - `trigger=all` 在所有阶段都注入；
 - 多个 SKILL 命中同一 trigger 时，按 `name` 字典序拼接（避免顺序漂移导致缓存无效）。
 
-> 可扩展点：`priority` 字段（数值大者先生效）；`cooldown`（防止注入过度）。
+> 调度已实现：`priority` 字段（数值大者先生效，互斥类仅留 priority 最高者）；`cooldown` 为后续可扩展点（防注入过度）。
 
 ---
 

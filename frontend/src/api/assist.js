@@ -20,6 +20,11 @@ export const assistApi = {
   // 参考资料推荐（从全局池挑值得导入本作品的）
   recommendReferences: (projectId, topK = 8) =>
     http.get(`/projects/${projectId}/references/recommend`, { params: { top_k: topK } }),
+
+  // 问题7：章节要素 AI 生成 / 润色（轻量非流式）
+  // body: { field_label, current_text, mode, context }
+  polishElement: (projectId, body) =>
+    http.post(`/projects/${projectId}/llm/polish-element`, body),
 }
 
 export const memoryApi = {

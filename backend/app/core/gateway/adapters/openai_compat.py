@@ -10,6 +10,7 @@ siliconflow（硅基流动）/ nvidia（英伟达 NIM）/ zhipu（智谱 GLM）�
   astream() 异步包装 stream() 以满足抽象基类接口。
 """
 import json
+import re
 import urllib.request
 import urllib.error
 
@@ -41,9 +42,11 @@ def _http_post(api_base: str, api_key: str, payload: dict):
 
 class OpenAICompatibleAdapter(BaseModelAdapter):
     # 仅这些厂商的 OpenAI 兼容端点认 chat_template_kwargs 这一非标准扩展字段
-    _CHAT_TEMPLATE_KWARGS_VENDORS = {"qwen", "nvidia"}
-    # 这些厂商用顶层 thinking.type 控制思考（OpenAI SDK 里走 extra_body，裸 HTTP 即顶层字段）
-    _THINKING_FIELD_VENDORS = {"deepseek", "zhipu"}
+    # 注意：NVIDIA NIM 上的 GLM-5.2 实际走顶层 thinking.type（与 zhipu 相同），
+    # 用 chat_template_kwargs 会导致流式下 content 为空、正文全进 reasoning_content。
+    _CHAT_TEMPLATE_KWARGS_VENDORS = {"qwen"}
+    # 用顶层 thinking.type 控制思考的厂商：deepseek / zhipu / nvidia（NVIDIA NIM 的 GLM 系同 zhipu）。
+    # 注意：绝不能用 chat_template_kwargs（会导致流式 content 为空、正文全进 reasoning_content）。
     # OpenAI 推理模型（o1/o3/o4 系列）用 max_completion_tokens，且不支持 temperature/top_p
     _OPENAI_REASONING_PREFIXES = ("o1", "o3", "o4")
 
@@ -55,6 +58,16 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
 
         vendor = (self.config.get("vendor") or "").lower()
         model = (self.config.get("model_name") or "").lower()
+        api_base = (self.config.get("api_base") or "").lower()
+        # 安全网：ModelScope 的 Qwen3.5 开 thinking 后，流式下正文 content 为空，
+        # 或把英文 reasoning（harmless/helpful/safe 之类 RLHF 推理词）塞进 content 污染正文、
+        # 导致正文变成「无标点长段 + 英文推理词 + 同义反复循环」。
+        # 关键：默认模型在库里标的是 vendor="custom"（不是 "qwen"），但端点就是 ModelScope 的
+        # Qwen3.5，因此按 model+api_base 命中，而非仅按 vendor=="qwen"（否则该组合被完全绕过）。
+        _broken_ms_qwen35 = ("qwen3.5" in model and "modelscope" in api_base)
+        if _broken_ms_qwen35:
+            enable_thinking = False
+
         max_tokens = params.get("max_tokens", self.config.get("max_tokens", 6000))
 
         payload = {
@@ -66,10 +79,30 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             "stream": False,
         }
 
+        # 重复惩罚（OpenAI 兼容标准字段）：专治长文本复读循环。
+        # frequency_penalty 惩罚「出现过的 token」的再次出现频率（建议 0.3~0.6）；
+        # presence_penalty 惩罚「出现过的新 token」进入候选（建议 0~0.4）。
+        # 章节生成长文本默认 0.4/0.4（chapter.py 按 vendor 注入 config）。
+        frequency_penalty = params.get("frequency_penalty", self.config.get("frequency_penalty"))
+        if frequency_penalty is not None:
+            payload["frequency_penalty"] = float(frequency_penalty)
+        presence_penalty = params.get("presence_penalty", self.config.get("presence_penalty"))
+        if presence_penalty is not None:
+            payload["presence_penalty"] = float(presence_penalty)
+
         # ── 思考模式字段：各厂商差异巨大，混用非标准字段会直接 400 ──
-        if vendor in self._CHAT_TEMPLATE_KWARGS_VENDORS:
-            # Qwen / NVIDIA(NIM-GLM)：认 chat_template_kwargs.enable_thinking
+        if vendor in self._CHAT_TEMPLATE_KWARGS_VENDORS or _broken_ms_qwen35:
+            # Qwen / 以及自定义厂商打到 ModelScope Qwen3.5 端点：认 chat_template_kwargs.enable_thinking。
+            # 关键：custom 厂商默认不发任何思考字段，会让 ModelScope Qwen3.5 按默认 thinking=ON 跑，
+            # reasoning 泄漏进 content（正文出现无标点长段 + harmless/helpful 等英文推理词）。
+            # 显式发 chat_template_kwargs.enable_thinking=false 才能真正关掉思考、拿到干净中文 content。
             payload["chat_template_kwargs"] = {"enable_thinking": bool(enable_thinking)}
+        elif vendor in ("zhipu", "nvidia"):
+            # 智谱 GLM-4.5+ / 英伟达 NIM GLM-5.2：顶层 thinking.type（enabled/disabled 均支持）。
+            # 修复项：此前 nvidia 漏配、走 fall-through 未发任何思考字段，导致 chapter.py 的
+            # 「强制开思考防复读」对 GLM 完全失效 —— 模型不思考硬写 3000+ 字长文，
+            # 易中英混写、整段不分段。现在显式发 thinking.type，与 zhipu 同款。
+            payload["thinking"] = {"type": "enabled" if enable_thinking else "disabled"}
         elif vendor == "deepseek":
             # DeepSeek：顶层 thinking.type；disabled 仅在 reasoning_effort=low 时合法
             if enable_thinking:
@@ -77,9 +110,6 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             else:
                 payload["thinking"] = {"type": "disabled"}
                 payload["reasoning_effort"] = "low"
-        elif vendor == "zhipu":
-            # 智谱 GLM-4.5+：顶层 thinking.type（enabled/disabled 均支持）
-            payload["thinking"] = {"type": "enabled" if enable_thinking else "disabled"}
         # 其余厂商（openai/kimi/ernie/spark/siliconflow/custom/ollama）：不发送任何思考控制字段，
         # 使用厂商默认行为，避免 “additional properties not allowed” 400。
 
@@ -121,12 +151,31 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         payload = self._payload(messages, **params)
         status, body = _http_post(self.config.get("api_base", ""), self.config.get("api_key", ""), payload)
         if status != 200:
+            if status == 429:
+                raise RuntimeError("请求过于频繁，请稍后再试")
             raise RuntimeError(f"模型调用失败(status={status}): {body[:300]}")
         try:
             data = json.loads(body)
             msg = data["choices"][0]["message"]
-            # content 即正文；reasoning/thinking 是思考过程，不混入正文
-            return msg.get("content") or ""
+            # content 即正文；reasoning/thinking 是思考过程，不混入正文。
+            # 兜底：部分厂商（NVIDIA NIM GLM-5.2）非流式也把正文塞进 reasoning_content/reasoning，
+            # 此时 content 为空；必须把 reasoning 作为正文输出，否则前端正文区域空白。
+            raw_content = msg.get("content")
+            if isinstance(raw_content, list):
+                # OpenAI 新内容格式：[{"type":"text","text":"..."}, ...]
+                content = "".join(p.get("text", "") for p in raw_content if isinstance(p, dict))
+            else:
+                content = (raw_content or "")
+            if content:
+                return content
+            # 兜底：部分厂商把正文塞进 reasoning/thinking 字段（NVIDIA NIM GLM-5.2 等）
+            for key in ("reasoning_content", "reasoning", "thinking", "thought"):
+                val = msg.get(key)
+                if val:
+                    return val
+            # 都没有：打印响应体片段便于排查，然后返回空
+            print(f"[openai_compat.chat] 返回为空: model={self.config.get('model_name')!r} body={body[:1000]!r}", flush=True)
+            return ""
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"解析模型响应失败: {body[:300]}") from e
 
@@ -159,6 +208,86 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             yield f"\n[模型调用失败 status={e.code}: {detail[:200]}]"
         except Exception as e:  # noqa: BLE001
             yield f"\n[模型调用异常: {str(e)[:200]}]"
+
+    def stream_with_thinking(self, messages, **params):
+        """流式返回「思考过程 + 正文」两种片段（供思考可见化展示）。
+
+        yield ("thinking", 思考片段) 或 ("content", 正文片段)。
+        思考来自推理模型的 reasoning_content / reasoning 字段，正文来自 content。
+        默认 stream() 保持纯正文（兼容旧调用方）；需要思考透传时用本方法。
+        """
+        payload = self._payload(messages, **params)
+        payload["stream"] = True
+        base = (self.config.get("api_base", "") or "").rstrip("/")
+        url = f"{base}/chat/completions"
+        req = _build_request(url, payload, self.config.get("api_key", ""))
+        # 调试日志：捕获原始 SSE 帧，用于排查 content/reasoning 字段分布
+        _raw_log_path = r"E:\AI小说创作\backend\glm_sse_raw.log"
+        _raw_log = open(_raw_log_path, "w", encoding="utf-8")
+        _frame_idx = 0
+        # 兜底：某些模型（如 NVIDIA NIM 的 GLM-5.2）在流式下会把正文也塞进 reasoning_content，
+        # content 始终为空。此时必须把 reasoning 也作为正文输出，否则前端正文区域空白。
+        _reasoning_buffer = []
+        _content_seen = False
+        try:
+            with urllib.request.urlopen(req, timeout=240) as resp:
+                for raw in resp:
+                    line = raw.decode("utf-8").strip()
+                    _frame_idx += 1
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        _raw_log.write(f"[{_frame_idx}] DONE\n")
+                        break
+                    try:
+                        obj = json.loads(data)
+                        delta = obj["choices"][0]["delta"]
+                        reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                        piece = delta.get("content") or ""
+                        # 只记录前 20 帧、content 非空帧、最后 5 帧，避免日志爆炸
+                        if _frame_idx <= 20 or piece or (_frame_idx % 50 == 0):
+                            _raw_log.write(
+                                f"[{_frame_idx}] reasoning_len={len(reasoning)} content_len={len(piece)} "
+                                f"reasoning_keys={list(delta.keys())}\n"
+                            )
+                            if piece:
+                                _raw_log.write(f"  CONTENT_SAMPLE: {piece[:120]!r}\n")
+                            if reasoning:
+                                _raw_log.write(f"  REASONING_SAMPLE: {reasoning[:120]!r}\n")
+                            _raw_log.flush()
+                        if reasoning:
+                            _reasoning_buffer.append(reasoning)
+                            yield ("thinking", reasoning)
+                        if piece:
+                            _content_seen = True
+                            yield ("content", piece)
+                    except Exception:  # noqa: BLE001
+                        continue
+            # 流正常结束：若正文始终未出现，把全部 reasoning 作为正文一次性兜底输出。
+            # 但若是英文分析（如 ModelScope Qwen3.5 thinking 泄漏），直接输出会污染正文，改为拒绝。
+            if not _content_seen and _reasoning_buffer:
+                fallback_content = "".join(_reasoning_buffer)
+                english_tokens = re.findall(r"[A-Za-z]{3,}", fallback_content)
+                if len("".join(english_tokens)) > len(fallback_content) * 0.15:
+                    print(
+                        "[openai_compat.stream_with_thinking] 正文为空且 reasoning 主要为英文分析，"
+                        f"疑似 thinking 泄漏，拒绝兜底输出。model={self.config.get('model_name')!r}"
+                    )
+                    yield ("content", "\n[生成异常：模型仅返回思考分析，未输出正文。请尝试关闭思考模式或更换模型。]")
+                else:
+                    yield ("content", fallback_content)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "ignore")
+            yield ("content", f"\n[模型调用失败 status={e.code}: {detail[:200]}]")
+        except Exception as e:  # noqa: BLE001
+            yield ("content", f"\n[模型调用异常: {str(e)[:200]}]")
+        finally:
+            try:
+                _raw_log.write(f"\n[TOTAL_FRAMES] {_frame_idx}\n")
+                _raw_log.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     async def astream(self, messages, **params):
         for chunk in self.stream(messages, **params):

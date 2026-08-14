@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_session
 from app.core.response import ok
-from app.schemas.reference import ReferenceDocCreate, ReferenceDoc, ReferenceDocSummary, ReferenceCatalogItem
+from app.schemas.reference import ReferenceDocCreate, ReferenceDoc, ReferenceDocSummary, ReferenceDocUpdate, ReferenceCatalogItem
 from app.services import reference_crud as svc
 
 router = APIRouter(tags=["参考文档"])
@@ -47,3 +47,11 @@ def delete_reference(project_id: str, doc_id: str, db: Session = Depends(get_ses
     if not svc.delete_reference(db, project_id, doc_id):
         raise HTTPException(status_code=404, detail="参考文档不存在")
     return ok({"deleted": doc_id})
+
+
+@router.put("/projects/{project_id}/references/{doc_id}", summary="重命名参考文档")
+def update_reference(project_id: str, doc_id: str, body: ReferenceDocUpdate, db: Session = Depends(get_session)):
+    doc = svc.update_reference(db, project_id, doc_id, body.filename)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="参考文档不存在")
+    return ok(doc.model_dump(mode="json"))

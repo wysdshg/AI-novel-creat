@@ -15,6 +15,10 @@ class ReferenceDocCreate(BaseModel):
     content_text: str = Field(default="", description="文件文本正文")
 
 
+class ReferenceDocUpdate(BaseModel):
+    filename: str = Field(..., min_length=1, max_length=200)
+
+
 class ReferenceDocSummary(BaseModel):
     """列表用：不含正文。"""
     id: str

@@ -187,6 +187,35 @@ class DiscussionMessageORM(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class DiscussionLoadLogORM(Base):
+    """P0 观测表：记录每轮商讨对话「实际加载了哪些设定/参考文件」。
+
+    用途（设定库加载机制演进的数据地基）：
+      - 频率统计：哪些设定被高频 LOAD_SETTING → 后续做常驻/预载的候选；
+      - 关联挖掘：同轮被一起加载的设定对 → 后续做 related_ids 关联边的依据；
+      - 阈值校准：question + 是否加载，作为 BM25 自动注入的 golden set。
+    仅观测、不参与任何业务逻辑；落库失败静默降级，绝不阻塞对话主流程。
+    """
+    __tablename__ = "discussion_load_logs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)   # __global__ = 全局对话
+    conversation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    chapter_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    question: Mapped[str] = mapped_column(Text, default="")           # 最近一条 user 消息（截断）
+    # 模型 Pass1 主动请求的 id（去重后）
+    load_ref_ids: Mapped[list] = mapped_column(JSON, default=list)       # LOAD_REFS:<ids>
+    load_setting_ids: Mapped[list] = mapped_column(JSON, default=list)   # LOAD_SETTING:<ids>
+    # 实际注入结果
+    ref_loaded: Mapped[bool] = mapped_column(Boolean, default=False)      # 参考文件真的取到了
+    setting_loaded: Mapped[bool] = mapped_column(Boolean, default=False)  # 设定详情真的取到了
+    # 流程分支标记
+    short_circuited: Mapped[bool] = mapped_column(Boolean, default=False)  # Pass1 直接当答案，未二次调用
+    pass1_failed: Mapped[bool] = mapped_column(Boolean, default=False)     # Pass1 失败/不可用，退回单次流式
+    model_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    vendor: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
 class ModelConfigORM(Base):
     __tablename__ = "model_configs"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

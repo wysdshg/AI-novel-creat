@@ -224,8 +224,8 @@ const onSubmit = async () => {
   background: #fafafa;
 }
 .cnd-global-hint { color: #909399; font-size: 13px; }
-.cnd-global-list { display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow: auto; }
-.cnd-global-item { width: 100%; margin: 0 !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cnd-global-list { display: flex; flex-direction: column; gap: 8px; max-height: 280px; overflow: auto; padding-right: 4px; }
+.cnd-global-item { width: 100%; margin: 0 !important; padding: 6px 0; min-height: 32px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cnd-global-name { font-weight: 500; }
 .cnd-global-meta { color: #909399; margin-left: 8px; font-size: 12px; }
 .cnd-global-count { margin-top: 8px; color: #909399; font-size: 12px; text-align: right; }
@@ -238,8 +238,8 @@ const onSubmit = async () => {
   background: #fafcfc;
 }
 .cnd-setting-hint { color: #409eff; font-size: 12px; margin-left: 8px; }
-.cnd-setting-list { display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow: auto; }
-.cnd-setting-item { width: 100%; margin: 0 !important; align-items: center; }
+.cnd-setting-list { display: flex; flex-direction: column; gap: 8px; max-height: 280px; overflow: auto; padding-right: 4px; }
+.cnd-setting-item { width: 100%; margin: 0 !important; padding: 6px 0; min-height: 32px; display: flex; align-items: center; }
 .cnd-setting-name { font-weight: 500; }
 .cnd-setting-cat { margin-left: 8px; font-size: 11px; }
 .cnd-setting-count { margin-top: 8px; color: #909399; font-size: 12px; text-align: right; }

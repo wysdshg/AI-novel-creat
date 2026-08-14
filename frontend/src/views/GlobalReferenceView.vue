@@ -32,9 +32,10 @@
       <el-table-column label="上传时间" width="180">
         <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="200" fixed="right">
+      <el-table-column label="操作" width="260" fixed="right">
         <template #default="{ row }">
           <el-button size="small" @click="previewDoc(row)">查看</el-button>
+          <el-button size="small" @click="renameDoc(row)">重命名</el-button>
           <el-button size="small" type="danger" @click="removeDoc(row)">删除</el-button>
         </template>
       </el-table-column>
@@ -117,6 +118,29 @@ async function removeDoc(row) {
     await loadDocs()
   } catch (e) {
     ElMessage.error('删除失败：' + (e?.message || '未知错误'))
+  }
+}
+
+async function renameDoc(row) {
+  try {
+    const { value } = await ElMessageBox.prompt('请输入新的文件名', '重命名', {
+      inputValue: row.filename,
+      confirmButtonText: '确认',
+      cancelButtonText: '取消',
+      inputValidator: (v) => {
+        if (!v || !v.trim()) return '文件名不能为空'
+        if (/[\\/:*?"<>|]/.test(v)) return '文件名不能包含以下字符：\\ / : * ? " < > |'
+        return true
+      },
+    })
+    const newName = value.trim()
+    if (newName === row.filename) return
+    await globalReferenceApi.rename(row.id, newName)
+    ElMessage.success('已重命名')
+    await loadDocs()
+  } catch (e) {
+    if (e === 'cancel' || (e && e.message === 'cancel')) return
+    ElMessage.error('重命名失败：' + (e?.message || '未知错误'))
   }
 }
 

@@ -590,15 +590,23 @@ def layer_stage_summaries(db: Session, project_id: str, chapter_no: int) -> Bloc
 # ===========================================================================
 
 def layer_discussion(db: Session, project_id: str, chapter_id: str | None = None,
-                     limit: int = 8) -> Block | None:
+                     conversation_id: str | None = None, limit: int = 8) -> Block | None:
     def _load():
         q = (
             db.query(DiscussionMessageORM)
             .filter_by(project_id=project_id)
             .filter(DiscussionMessageORM.archived_chapter_id.is_(None))
         )
+        # 线程优先级与写入侧严格对称：章线程 > 会话线程 > 小说级默认线程（两者皆 NULL）
         if chapter_id:
             q = q.filter(DiscussionMessageORM.chapter_id == chapter_id)
+        elif conversation_id:
+            q = q.filter(DiscussionMessageORM.conversation_id == conversation_id)
+        else:
+            q = q.filter(
+                DiscussionMessageORM.chapter_id.is_(None),
+                DiscussionMessageORM.conversation_id.is_(None),
+            )
         rows = q.order_by(DiscussionMessageORM.created_at.desc()).limit(max(1, limit)).all()
         if not rows:
             return None
