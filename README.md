@@ -1,6 +1,6 @@
 # AI 小说创作智能体
 
-本机单人使用的**长篇小说写作辅助工具**。
+个人使用的**长篇小说写作辅助工具**。
 
 - 后端：FastAPI + SQLAlchemy 2.0 + SQLite
 - 前端：Vue 3 + Element Plus + Pinia + Vite
