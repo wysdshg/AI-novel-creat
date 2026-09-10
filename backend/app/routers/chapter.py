@@ -134,37 +134,63 @@ class _RepetitionGuard:
 
 
 def _dedup_trailing_repeats(text: str) -> str:
-    """后处理：剪掉尾部重复段落（流式检测的兜底）。
+    """后处理：剪掉尾部**连续复读**段落（流式检测的兜底）。
 
-    按「\\n\\n」分段，从末尾向前检查是否有段落与前面某段高度相似（>80%），
-    连续 2 段以上重复则全部裁掉。
+    2026-09-09 重写。旧实现（单段字符集 Jaccard>0.8 即从此段全裁）在中文
+    短段落风格下误杀率极高——实测 7 字的「沈砚看向水洼。」与 75 段之前的
+    「沈砚看水洼。」Jaccard=0.857，导致后面 97 段（1482 字符）正常剧情被
+    全部裁掉（超短段字符集差一个字相似度就爆表）。
+    新规则（三条同时满足才裁）：
+      1. 只检查长段（≥20 字）：短句呼应/口头禅是正常写作手法，不参与判定；
+      2. 相似度用 difflib（内容敏感），阈值 0.8；字符集 Jaccard 仅作 0.3 以下的快速预筛；
+      3. 必须**连续 ≥3 个长段**都与前文相似才判定为复读块（单段相似=呼应，连续相似=复读）。
     """
     paras = re.split(r'\n\n+', text.strip())
-    if len(paras) < 3:
+    if len(paras) < 6:
         return text
 
-    kept = list(paras)
-    # 从倒数第 2 段开始往前检查
-    i = len(kept) - 2
-    while i >= 0:
-        current = kept[i].strip()
-        if not current:
-            i -= 1
-            continue
-        # 在已保留的段落中找相似的
-        dup_start = -1
-        for j in range(i):
-            if _similarity(current, kept[j].strip()) > 0.8:
-                dup_start = i
-                break
-        if dup_start >= 0:
-            # 裁掉从 dup_start 到末尾的所有段落
-            kept = kept[:dup_start]
-            i = len(kept) - 2
-        else:
-            i -= 1
+    MIN_LEN, TH, RUN = 20, 0.8, 3
+    import difflib
 
-    return '\n\n'.join(kept)
+    def _sim(pj: str, cur: str, cs: set) -> bool:
+        if len(pj) < MIN_LEN:
+            return False
+        if len(cs & set(pj)) / len(cs | set(pj)) < 0.3:
+            return False  # 用字面都不像，必不相似，跳过昂贵的 difflib
+        return difflib.SequenceMatcher(None, cur, pj).ratio() > TH
+
+    def _is_dup(idx: int) -> bool:
+        cur = paras[idx].strip()
+        if len(cur) < MIN_LEN:
+            return False
+        cs = set(cur)
+        for j in range(idx):
+            if _sim(paras[j].strip(), cur, cs):
+                return True
+        # 或与紧邻后一段相似：复读块的「块首」前面是正常文本，
+        # 只向前文比较会让它永远判 False，导致正好 RUN 段的复读块裁不掉
+        # （2026-09-09 单测骨架暴露：repeat×3 紧跟正文时 run 只能数到 2）。
+        if idx + 1 < len(paras) and _sim(paras[idx + 1].strip(), cur, cs):
+            return True
+        return False
+
+    # 从末尾向前找「连续 RUN 个长段 dup」的块；短段中性（不计入也不打断）。
+    run, cut_start = 0, -1
+    for i in range(len(paras) - 1, -1, -1):
+        if len(paras[i].strip()) < MIN_LEN:
+            continue
+        if _is_dup(i):
+            run += 1
+            if run >= RUN:
+                cut_start = i
+        else:
+            if run >= RUN:
+                break
+            run = 0
+
+    if cut_start < 0:
+        return text
+    return '\n\n'.join(paras[:cut_start])
 
 
 def _similarity(a: str, b: str) -> float:
@@ -376,7 +402,17 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
     # 需留余量避免正文被截断；非思考场景模型会提前停止，不会真写到上限。可用环境变量覆盖。
     _target_words = (body.word_range or {}).get("max", 5000) or 5000
     _hard_cap = int(os.environ.get("NA_CHAPTER_MAX_TOKENS", "8192"))
-    chapter_max_tokens = min(int(_target_words * 1.2) + 256, _hard_cap)
+    # 2026-09-10（04-B13 续）：魔搭 GLM-5.3-Flash 的 reasoning 先吃 1300~2200 token
+    # 预算（实测三档探测），×1.2+256=3256 档正文被挤压到逼近上限 → 末段标点崩坏
+    # （无标点连排 411 字）+ 字数不足 1464。
+    # 用户拍板（2026-09-10）：GLM-5.3-Flash 按调用次数计费，token 不用省——
+    # 直接给满 32768（实测魔搭接受、finish=stop 正常；_RepetitionGuard + stream
+    # close 兜底防失控拖时）。其余模型（按 token 计费/本地）保持原公式。
+    _glm_family = "glm" in ((default.model_name if default else "") or "").lower()
+    if _glm_family:
+        chapter_max_tokens = 32768
+    else:
+        chapter_max_tokens = min(int(_target_words * 1.2) + 256, _hard_cap)
 
     scan_enabled = bool(app_config.get(db, app_config.KEY_HUMANIZE_SCAN, True))
     ingest_enabled = bool(app_config.get(db, app_config.KEY_INGEST_ENABLED, True))
@@ -419,7 +455,13 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
             # （torches）、重复 4 字词暴增；惩罚清零后同一管线（同提示词同温度）
             # 输出完全正常（标点密度 0.167、最长无标点段 18、零拉丁字母）。
             # → 该组合默认惩罚归零；其它厂商保留 0.4。env 可显式覆盖。
-            _modelscope_qwen35 = ("qwen3.5" in _model) and ("modelscope" in _api_base)
+            # 2026-09-09 放宽：Qwen3.8-Flash-Next 上线后 "qwen3.5" 字面匹配失配，
+            # 惩罚回落 0.4/0.4 实测复现退化（标点密度 0.013、最长无标点段 1870 字）。
+            # 改为正则匹配 Qwen3.x 全系（qwen3.5 / qwen3.8 / 后续小版本）。
+            _modelscope_qwen35 = (
+                bool(re.search(r"qwen3\.\d", _model, re.IGNORECASE))
+                and ("modelscope" in _api_base)
+            )
             _rep_env = os.environ.get("NA_CHAPTER_REP_PENALTY")
             if _rep_env:
                 _rep = float(_rep_env)
@@ -442,13 +484,14 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
             _vendor = (default.vendor or "").lower()
             _model = (default.model_name or "").lower()
             _api_base = (default.api_base or "").lower()
-            # ModelScope 上的 Qwen3.5 开 thinking 后，流式下 reasoning_content 挤占 token 预算，
+            # ModelScope 上的 Qwen3.x 开 thinking 后，流式下 reasoning_content 挤占 token 预算，
             # 或把英文 reasoning 直接塞进 content（正文变无标点长段 + harmless/helpful 等推理词）。
             # 强制关闭 thinking（用户显式开启也覆盖），保证正文 content 是干净中文叙事。
-            # 命中条件改为「model 含 qwen3.5 且 api_base 含 modelscope」，不限 vendor——
+            # 命中条件：「model 匹配 qwen3.x（正则）且 api_base 含 modelscope」，不限 vendor——
             # 默认模型标的是 vendor="custom"，若仍要求 vendor=="qwen" 会被完全绕过。
+            # 2026-09-09 放宽：qwen3.5 字面匹配 → qwen3.x 正则（Qwen3.8-Flash-Next 实测同病）。
             _broken_thinking_combo = (
-                "qwen3.5" in _model
+                bool(re.search(r"qwen3\.\d", _model))
                 and "modelscope" in _api_base
             )
 
@@ -456,8 +499,12 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
             # 章节生成强制开思考。本地 ollama 除外：其 think=true 时正文为空（回答含在 thinking 里），
             # 不适合章节正文。可用 NA_CHAPTER_FORCE_THINKING=0 关闭强制。
             # 注意：broken combo 必须用 elif 排除，否则会被上面的强制逻辑重新打开 thinking。
+            # 2026-09-09 实验调整：Qwen3.8-Flash-Next 关 thinking 后单次生成偏短（1493 字，
+            # 同参数下 Qwen3.5-122B 为 2566~2805）。改为**尊重显式指定**：
+            # 请求体 enable_thinking=True 时不强关（路由层 _content_only_stream 已保证
+            # reasoning 不进正文，开思考的代价只剩首字延迟与 token 预算）；未显式指定则维持默认关。
             if _broken_thinking_combo:
-                want_thinking = False
+                want_thinking = True if body.enable_thinking is True else False
             elif (
                 want_thinking is not True
                 and os.environ.get("NA_CHAPTER_FORCE_THINKING", "1") == "1"
@@ -532,6 +579,13 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
                 yield _sse("validate", {"issues": []})
         else:
             yield _sse("validate", {"issues": []})
+
+        # 未配置模型时的占位文本：不得覆盖已有章节正文（否则静默丢数据）。
+        # 重新生成场景直接跳过落库，提示用户先配置模型。
+        if not use_model and body.chapter_id:
+            yield _sse("chunk", {"text": "\n\n[未配置可用模型，已保留原章节正文。请在「模型配置」中添加并设为默认后重试]"})
+            yield _sse("done", {"chapter_id": body.chapter_id, "word_count": 0})
+            return
 
         # 落库（4 级结构下 article_id 从 body 透传）
         # 重新生成（body.chapter_id 非空）→ 覆盖原章（保持章号，不新建、不递增计数）；

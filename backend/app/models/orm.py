@@ -360,6 +360,39 @@ class WorkflowORM(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class WorkflowRunORM(Base):
+    """工作流运行记录（一次 execute 对应一行，SSE 流式执行）。"""
+
+    __tablename__ = "workflow_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workflow_id: Mapped[str] = mapped_column(String(36), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="running")  # pending/running/success/failed
+    inputs: Mapped[dict] = mapped_column(JSON, default=dict)            # 运行入参（start 节点变量）
+    outputs: Mapped[dict] = mapped_column(JSON, default=dict)           # end 节点输出（最终结果）
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class WorkflowNodeRunORM(Base):
+    """工作流节点执行轨迹（一次 node 执行一行，供「运行历史→节点轨迹」查看）。"""
+
+    __tablename__ = "workflow_node_runs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(36), index=True)
+    workflow_id: Mapped[str] = mapped_column(String(36), index=True)
+    node_id: Mapped[str] = mapped_column(String(60))                    # 画布节点 id
+    node_type: Mapped[str] = mapped_column(String(30), default="generic")
+    label: Mapped[str] = mapped_column(String(120), default="")
+    status: Mapped[str] = mapped_column(String(20), default="running")  # running/success/failed/skipped
+    inputs: Mapped[dict] = mapped_column(JSON, default=dict)            # 节点实际读取的变量值
+    outputs: Mapped[dict] = mapped_column(JSON, default=dict)           # 节点输出（可能含长正文）
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 # ============================================================================
 # 分层记忆体系（需求 3、4 的地基）
 # ----------------------------------------------------------------------------
@@ -432,3 +465,24 @@ class AppConfigORM(Base):
     value: Mapped[dict | list | str | int | float | bool | None] = mapped_column(JSON, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class VectorChunkORM(Base):
+    """向量索引块（A 线检索升级，2026-09-10）：语料切块 + embedding 存储。
+
+    source of truth 在这张普通表（SQLAlchemy 管理，自动迁移友好）；
+    sqlite-vec 的 vec0 虚拟表 `vec_index` 只是可选加速索引（可随时重建），
+    加载失败时 vector_store 自动回退纯 Python 余弦——接口不变。
+    向量维度由 embedding 模型决定（bge-m3 = 1024），换模型需清表重建。
+    """
+    __tablename__ = "vector_chunks"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_type: Mapped[str] = mapped_column(String(40), index=True)  # ref_doc | chapter_memory
+    source_id: Mapped[str] = mapped_column(String(36), index=True)    # doc.id / memory.id
+    chunk_idx: Mapped[int] = mapped_column(Integer, default=0)
+    chunk_text: Mapped[str] = mapped_column(Text, default="")
+    model: Mapped[str] = mapped_column(String(120), default="")
+    dim: Mapped[int] = mapped_column(Integer, default=0)
+    embedding_json: Mapped[str] = mapped_column(Text, default="")     # float 数组 JSON（1024 维约 20KB）
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

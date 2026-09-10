@@ -89,6 +89,10 @@ export const useProjectStore = defineStore('project', {
         console.error('加载模型列表失败', e)
       }
     },
+    // 切换当前模型（模型下拉选择绑定）
+    selectModel(id) {
+      this.currentModelId = id
+    },
     // 新建小说成功后并入列表（不重复请求）
     addNovel(novel) {
       if (this.novels.find((n) => n.id === novel.id)) return
@@ -186,6 +190,10 @@ export const useProjectStore = defineStore('project', {
       this.novels = this.novels.filter((n) => n.id !== id)
       if (this.currentNovelId === id) {
         this.currentNovelId = this.novels.length ? this.novels[0].id : ''
+        // 清除被删小说的会话与消息残留，避免界面显示已删小说的旧对话
+        this.currentConversationId = ''
+        this.currentChapterId = ''
+        this.discussionMessages = []
         this.resetStructureState()
         this._saveActiveToStorage()
       }
@@ -252,7 +260,7 @@ export const useProjectStore = defineStore('project', {
         this.sendingDiscussion = true
         try {
           await discussionGlobalChatStream(
-            { messages: history, enable_thinking: enableThinking, model_id: this.currentModelId || undefined },
+            { messages: history, enable_thinking: enableThinking, model_id: this.currentModelId || undefined, conversation_id: this.currentConversationId || null },
             (event, data) => {
               const current = this.discussionMessages[aiIndex]
               if (event === 'chunk') {
@@ -350,12 +358,12 @@ export const useProjectStore = defineStore('project', {
     // ★ 关键：写入侧（sendDiscussion）在有 chapterId 时强制 conversationId=null，
     //   读取侧必须对称——否则写进章桶、从会话桶读，消息必然丢失。
     async loadDiscussion(chapterId = this.currentChapterId, conversationId = this.currentConversationId) {
-      // 未选小说 → 加载全局线程历史（豆包式通用对话也要有记忆）
+      // 未选小说 → 全局线程；若已建漫游会话则按会话读取（会话间互不串台）
       const isGlobal = !this.currentNovelId
       const projectId = isGlobal ? GLOBAL_PROJECT_ID : this.currentNovelId
       if (isGlobal) {
         chapterId = null
-        conversationId = null
+        conversationId = this.currentConversationId || null
       } else if (chapterId) {
         // 章级模式：强制清空 conversationId，与写入侧对称
         conversationId = null
@@ -425,9 +433,9 @@ export const useProjectStore = defineStore('project', {
     selectConversation(id) {
       const conv = this.conversations.find((c) => c.id === id)
       this.currentConversationId = id
-      // 该会话绑过小说 → 切到对应小说并离开章线程；不绑则保持当前小说不动
-      if (conv && conv.novelId) {
-        this.currentNovelId = conv.novelId
+      // 该会话绑过小说 → 切到对应小说并离开章线程；未绑定 → 回到全局漫游模式
+      if (conv) {
+        this.currentNovelId = conv.novelId || ''
         this.currentChapterId = ''
       }
       this._saveActiveToStorage()
@@ -446,6 +454,7 @@ export const useProjectStore = defineStore('project', {
       }
     },
     removeConversation(id) {
+      const conv = this.conversations.find((c) => c.id === id) || null
       const wasActive = this.currentConversationId === id
       this.conversations = this.conversations.filter((c) => c.id !== id)
       this._saveConversationsToStorage()
@@ -456,9 +465,10 @@ export const useProjectStore = defineStore('project', {
         if (this.currentNovelId) this.ensureConversation(this.currentNovelId)
       }
       this._saveActiveToStorage()
-      // 一并删除该会话在数据库中的消息，避免孤儿数据
-      if (this.currentNovelId) {
-        discussionClear(this.currentNovelId, null, id).catch((e) =>
+      // 一并删除该会话在数据库中的消息，避免孤儿数据；用会话自身绑定的作品（全局漫游 → __global__）
+      if (conv) {
+        const projectId = conv.novelId || GLOBAL_PROJECT_ID
+        discussionClear(projectId, null, id).catch((e) =>
           console.error('删除会话消息失败', e),
         )
       }

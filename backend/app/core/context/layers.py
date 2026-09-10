@@ -467,9 +467,6 @@ def layer_foreshadows(db: Session, project_id: str, trigger_ids: list[str] | Non
             for f, piece in pending:
                 txt = (f.description or "") + " " + (f.trigger_condition or "")
                 scored.append((_relevance(txt, query_text), piece))
-            for f, piece in pending:
-                txt = (f.description or "") + " " + (f.trigger_condition or "")
-                scored.append((_relevance(txt, query_text), piece))
             scored.sort(key=lambda x: -x[0])
             kept_pending = [p for rel, p in scored if rel > 0]
             if not kept_pending:

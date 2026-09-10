@@ -173,6 +173,20 @@ def build_chapter_messages(
         mention_src.append(disc_block.content)
     mentions = layers.extract_mentions(db, project_id, *mention_src)
 
+    # ---------- 1.5 实体图一跳扩展（A5 GraphRAG）----------
+    # 要点提到配角 B → 把 B 的师父/同门/所属宗门/关联地点提升为「本章重点实体」，
+    # 交给下面各层按全量渲染（否则它们只是一行简写，AI 写「回宗门搬救兵」时只能现编）。
+    graph_trace: dict = {}
+    try:
+        from app.services import entity_graph
+        if entity_graph.enabled(db):
+            mentions, graph_trace = entity_graph.expand(db, project_id, mentions)
+        else:
+            graph_trace = {"enabled": False, "reason": "配置关闭"}
+    except Exception as e:  # noqa: BLE001
+        print(f"[builder] 实体图扩展跳过: {type(e).__name__}: {str(e)[:80]}")
+        graph_trace = {"enabled": True, "error": f"{type(e).__name__}: {str(e)[:80]}"}
+
     # ---------- 2. 逐层取数 ----------
     recent_n = int(app_config.get(db, app_config.KEY_RECENT_MEMORY_N, 3) or 3)
     blocks: list[Block] = []
@@ -250,6 +264,7 @@ def build_chapter_messages(
         "budget": plan.debug(),
         "references": ref_detail,
         "mentions": {k: sorted(v) for k, v in mentions.items()},
+        "entity_graph": graph_trace,
         "skills": skill_dispatch.explain(db, "chapter"),
         "layer_mode": lmode,
         "system_chars": len(system),

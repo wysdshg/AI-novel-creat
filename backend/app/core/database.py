@@ -7,7 +7,7 @@
 - get_session 是 FastAPI 依赖，提供请求级数据库会话。
 """
 from pathlib import Path
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event, Engine
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 from app.core.config import DEFAULT_DB_URL
@@ -16,6 +16,23 @@ Base = declarative_base()
 
 _engine = None
 SessionLocal = None
+
+
+@event.listens_for(Engine, "connect")
+def _load_sqlite_vec(dbapi_conn, _record):
+    """每个新 sqlite3 连接加载 sqlite-vec 扩展（vec0 虚拟表查询必需）。
+
+    加载失败静默跳过——vector_store 会自动回退纯 Python 余弦，接口不变。
+    """
+    if type(dbapi_conn).__module__ != "sqlite3":
+        return
+    try:
+        import sqlite_vec
+        dbapi_conn.enable_load_extension(True)
+        sqlite_vec.load(dbapi_conn)
+        dbapi_conn.enable_load_extension(False)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def get_engine():
@@ -111,7 +128,9 @@ def init_db():
     """建表 + 增量迁移。幂等，可重复调用。
 
     1) create_all 负责新建尚未存在的表；
-    2) _auto_migrate 负责给已有表补齐 ORM 中新增的列（SQLite 不支持自动增量变更）。
+    2) _auto_migrate 负责给已有表补齐 ORM 中新增的列（SQLite 不支持自动增量变更）；
+    3) _ensure_vec_index 建 sqlite-vec 虚拟表（A 线检索升级的可选加速索引，
+       失败不阻断启动——vector_store 会走纯 Python 回退）。
     """
     engine = get_engine()
     import app.models.orm  # noqa: F401
@@ -122,3 +141,51 @@ def init_db():
             print(f"[init_db] 自动迁移新增列: {', '.join(added)}")
     except Exception as e:  # 迁移失败不应阻断启动
         print(f"[init_db] 自动迁移跳过/失败: {e}")
+    _ensure_vec_index(engine)
+
+
+def _ensure_vec_index(engine):
+    """建/升级 vec0 虚拟表（向量 KNN 加速索引）。失败静默——接口层自会回退。
+
+    ⚠️ vec_index 是**全局表**（所有作品 + 全局资料池共用一张），KNN 必须靠
+    project_id/source_type 辅助列在查询内先过滤再取 k——否则全局池会挤占
+    top-k 名额（2026-09-10 实测踩中：4 份本项目资料只召回 1 份）。
+    故 schema 必须含这两个辅助列；检测到旧 schema 直接删表重建（索引可重建，
+    source of truth 在 vector_chunks），并从 vector_chunks 自愈回填。
+    """
+    from sqlalchemy import text
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_index'"
+            )).fetchone()
+            if row is not None and "project_id" not in (row[0] or ""):
+                print("[init_db] vec_index 为旧 schema（缺 project_id 辅助列），删除重建")
+                conn.execute(text("DROP TABLE vec_index"))
+                conn.commit()
+                row = None
+
+            conn.execute(text(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS vec_index USING vec0("
+                "chunk_id text primary key, embedding float[1024], "
+                "project_id text, source_type text)"
+            ))
+            conn.commit()
+
+            # 虚拟表是空的但主表有数据（首次建表 / 刚重建）→ 从 vector_chunks 回填
+            n_vec = conn.execute(text("SELECT COUNT(*) FROM vec_index")).scalar() or 0
+            if not n_vec:
+                try:
+                    n_src = conn.execute(text("SELECT COUNT(*) FROM vector_chunks")).scalar() or 0
+                except Exception:  # noqa: BLE001
+                    n_src = 0
+                if n_src:
+                    from app.services.vector_store import rebuild_vec_index
+                    from sqlalchemy.orm import Session
+                    with Session(engine) as s:
+                        n = rebuild_vec_index(s)
+                        s.commit()
+                    print(f"[init_db] vec_index 已从 vector_chunks 回填 {n} 块")
+    except Exception as e:  # noqa: BLE001
+        print(f"[init_db] vec_index 虚拟表不可用（向量检索走暴力回退）: {type(e).__name__}: {e}")

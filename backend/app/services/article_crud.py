@@ -3,7 +3,7 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from app.models.orm import ArticleORM, VolumeORM
+from app.models.orm import ArticleORM, VolumeORM, ChapterORM
 from app.schemas.article import ArticleCreate, ArticleUpdate
 
 
@@ -68,6 +68,7 @@ def delete_article(db: Session, project_id: str, article_id: str) -> bool:
     o = get_article(db, project_id, article_id)
     if not o:
         return False
+    db.query(ChapterORM).filter_by(article_id=article_id).delete()
     db.delete(o)
     db.commit()
     return True

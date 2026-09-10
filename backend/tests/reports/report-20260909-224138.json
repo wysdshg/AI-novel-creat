@@ -1,0 +1,72 @@
+{
+  "time": "2026-09-09T22:41:38.116753",
+  "model": "Qwen/Qwen3.8-Flash-Next",
+  "model_id": "ef4047c415dd4db3b89bcde93daa06c5",
+  "target_words": 2500,
+  "gen_secs": 22.3,
+  "ttfc": 1.8,
+  "metrics": {
+    "chars": 1493,
+    "punct_density": 0.125,
+    "max_no_punct_len": 20,
+    "latin_count": 0,
+    "max_3gram_repeat": 4,
+    "top_3gram": [
+      [
+        "城隍庙",
+        4
+      ],
+      [
+        "沈砚的",
+        4
+      ],
+      [
+        "，像是",
+        4
+      ],
+      [
+        "个孩子",
+        3
+      ],
+      [
+        "伸手去",
+        3
+      ]
+    ],
+    "para_head_repeat": [
+      [
+        "沈砚",
+        16
+      ],
+      [
+        "就在",
+        3
+      ],
+      [
+        "像是",
+        3
+      ]
+    ],
+    "error_markers": []
+  },
+  "humanize_score": 100.0,
+  "events": [
+    "start",
+    "context",
+    "validate",
+    "saved",
+    "ingest_start",
+    "done"
+  ],
+  "stopped": null,
+  "saved": {
+    "chapter_id": "f4233e92964b4f7dbf5b7dd372d8ca56",
+    "word_count": 1695
+  },
+  "memory_ok": true,
+  "passed": false,
+  "fails": [
+    "字数达标（1493 字，阈值 ≥1800）"
+  ],
+  "warns": []
+}

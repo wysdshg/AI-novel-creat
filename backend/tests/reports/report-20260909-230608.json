@@ -1,0 +1,70 @@
+{
+  "time": "2026-09-09T23:06:08.494134",
+  "model": "Qwen/Qwen3.8-Flash-Next",
+  "model_id": "ef4047c415dd4db3b89bcde93daa06c5",
+  "target_words": 2500,
+  "gen_secs": 148.8,
+  "ttfc": 133.8,
+  "metrics": {
+    "chars": 1894,
+    "punct_density": 0.138,
+    "max_no_punct_len": 13,
+    "latin_count": 0,
+    "max_3gram_repeat": 7,
+    "top_3gram": [
+      [
+        "。”孩",
+        7
+      ],
+      [
+        "”孩子",
+        7
+      ],
+      [
+        "”沈砚",
+        5
+      ],
+      [
+        "把铜牌",
+        5
+      ],
+      [
+        "的。”",
+        5
+      ]
+    ],
+    "para_head_repeat": [
+      [
+        "沈砚",
+        18
+      ],
+      [
+        "孩子",
+        9
+      ],
+      [
+        "都头",
+        7
+      ]
+    ],
+    "error_markers": []
+  },
+  "humanize_score": 100.0,
+  "events": [
+    "start",
+    "context",
+    "validate",
+    "saved",
+    "ingest_start",
+    "done"
+  ],
+  "stopped": null,
+  "saved": {
+    "chapter_id": "78c2c3aa2d584bab95c6d3c18cd63901",
+    "word_count": 2082
+  },
+  "memory_ok": true,
+  "passed": true,
+  "fails": [],
+  "warns": []
+}

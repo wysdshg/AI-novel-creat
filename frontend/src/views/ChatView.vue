@@ -185,7 +185,7 @@ const onConfirmEntities = async (m) => {
       store.currentChapterId || null,
       m.meta.items,
     )
-    const { created = [], skipped = [] } = res?.data?.data || {}
+    const { created = [], skipped = [] } = res || {}
     let tip = `已写入 ${created.length} 条`
     if (skipped.length) tip += `，跳过 ${skipped.length} 条（${skipped.map((s) => s.reason).join('、')}）`
     m.meta.confirmed = true

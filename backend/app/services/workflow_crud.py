@@ -26,12 +26,19 @@ def _now() -> datetime:
 def _to_schema(o: WorkflowORM) -> Workflow:
     # WorkflowORM 的 nodes/edges 是 list[dict]；用 Pydantic 转换时需 alias for "from"
     # FlowEdge 字段命名为 "from_"（alias "from"），model_validate 兼容 dict 输入。
+    # 兼容历史脏数据：早期 update 未带 by_alias=True，把 from_ 键直接落库，
+    # 读取时归一为 alias 键 from，避免 ValidationError 导致 500。
+    edges = []
+    for e in o.edges or []:
+        if isinstance(e, dict) and "from_" in e and "from" not in e:
+            e = {**e, "from": e.pop("from_")}
+        edges.append(e)
     return Workflow.model_validate({
         "id": o.id,
         "name": o.name,
         "description": o.description,
         "nodes": o.nodes or [],
-        "edges": o.edges or [],
+        "edges": edges,
         "tags": o.tags or [],
         "is_active": o.is_active,
         "created_at": o.created_at,
@@ -91,7 +98,7 @@ def update_workflow(
     o = db.query(WorkflowORM).filter_by(id=wf_id).first()
     if o is None:
         return None
-    payload = data.model_dump(exclude_unset=True)
+    payload = data.model_dump(exclude_unset=True, by_alias=True)
     if "nodes" in payload:
         o.nodes = [n if isinstance(n, dict) else n.model_dump(exclude_none=True) for n in payload["nodes"]]
         payload.pop("nodes")

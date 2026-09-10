@@ -95,7 +95,18 @@ def create_reference(db: Session, project_id: str, data: ReferenceDocCreate) -> 
     db.add(o)
     db.commit()
     db.refresh(o)
+    _index_doc_silent(db, o)  # A3：上传即建向量索引（无 key 静默跳过）
     return _to_full(o)
+
+
+def _index_doc_silent(db: Session, o: ReferenceDocORM) -> None:
+    """文档落库后同步建向量索引。失败静默——向量是增强能力，不阻断上传主流程。"""
+    try:
+        from app.services import vector_index
+        vector_index.index_reference_doc(db, o)
+        db.commit()
+    except Exception as e:  # noqa: BLE001
+        print(f"[reference_crud] 向量索引跳过: {type(e).__name__}: {str(e)[:80]}")
 
 
 def get_reference(db: Session, project_id: str, doc_id: str) -> ReferenceDoc | None:
@@ -107,6 +118,11 @@ def delete_reference(db: Session, project_id: str, doc_id: str) -> bool:
     o = db.query(ReferenceDocORM).filter_by(project_id=project_id, id=doc_id).first()
     if o is None:
         return False
+    try:
+        from app.services import vector_index
+        vector_index.remove_reference_doc(db, o)  # 向量块与文档同事务删除
+    except Exception:  # noqa: BLE001
+        pass
     db.delete(o)
     db.commit()
     return True
@@ -357,28 +373,31 @@ def import_global_references(db: Session, project_id: str, doc_ids: list[str]) -
     )
     now = _now()
     count = 0
+    created: list[ReferenceDocORM] = []
     for o in src:
         content = o.content_text or ""
         if len(content) > MAX_CONTENT_CHARS:
             content = content[:MAX_CONTENT_CHARS] + "\n…(内容超出上限，已截断)"
-        db.add(
-            ReferenceDocORM(
-                id=uuid.uuid4().hex,
-                project_id=project_id,
-                article_id=None,  # 进入小说维度，非篇章维度
-                filename=o.filename,
-                content_type=o.content_type or "text/plain",
-                size=o.size or len(content.encode("utf-8")),
-                content_text=content,
-                summary=o.summary or auto_summary(content),
-                tags=list(o.tags or []) or auto_tags(o.filename, content),
-                source="global",
-                created_at=now,
-                updated_at=now,
-            )
+        copy = ReferenceDocORM(
+            id=uuid.uuid4().hex,
+            project_id=project_id,
+            article_id=None,  # 进入小说维度，非篇章维度
+            filename=o.filename,
+            content_type=o.content_type or "text/plain",
+            size=o.size or len(content.encode("utf-8")),
+            content_text=content,
+            summary=o.summary or auto_summary(content),
+            tags=list(o.tags or []) or auto_tags(o.filename, content),
+            source="global",
+            created_at=now,
+            updated_at=now,
         )
+        db.add(copy)
+        created.append(copy)
         count += 1
     db.commit()
+    for copy in created:
+        _index_doc_silent(db, copy)  # A3：导入副本也建向量索引
     return count
 
 
@@ -529,7 +548,17 @@ def pick_relevant(
     top_k: int = 4,
     per_doc_chars: int = 3000,
 ) -> tuple[str, list[dict]]:
-    """挑出与本章相关的参考文档，拼成上下文。
+    """挑出与本章相关的参考文档，拼成上下文（A3+A4：关键词/向量双通道 RRF + rerank 重排）。
+
+    双通道：
+      通道一 关键词 —— score_reference（标签/文件名/摘要/实体名），专有名词最强项；
+      通道二 向量   —— vector_index.search_similar（bge-m3 语义检索），
+                       未配 key / 未建索引时静默为空，行为退化回纯关键词版。
+    融合：RRF（Reciprocal Rank Fusion，k=60 标准参数）——
+      score(doc) = Σ 1/(60 + rank_通道(doc))，只对出现在至少一个通道的文档计分。
+      RRF 只用名次不用原始分，两路量纲不同也无需调权。
+    重排（A4）：RRF 取 top_k×3 候选 → bge-reranker-v2-m3 交叉编码器逐对打分 →
+      取 top_k。rerank 失败静默降级为 RRF 原序。
 
     返回 (拼接文本, 命中明细)。明细供前端展示「本章参考了哪几份资料」。
 
@@ -557,9 +586,65 @@ def pick_relevant(
     must = [r for r in rows if (r.source or "") == "auto" or r.article_id]
     optional = [r for r in rows if r not in must]
 
-    scored = [(score_reference(d, query_text, entity_names), d) for d in optional]
-    scored.sort(key=lambda x: (-x[0], x[1].created_at or _now()))
-    picked = [d for s, d in scored[:max(0, top_k)] if s > 0]
+    # ---- 通道一：关键词 ----
+    kw_scored = sorted(
+        ((score_reference(d, query_text, entity_names), d) for d in optional),
+        key=lambda x: (-x[0], x[1].created_at or _now()),
+    )
+    kw_rank = {d.id: i for i, (s, d) in enumerate(kw_scored, 1) if s > 0}
+
+    # ---- 通道二：向量（失败/未配置静默为空）----
+    vec_rank: dict[str, int] = {}
+    vec_top: dict[str, float] = {}
+    try:
+        from app.services import vector_index
+        optional_ids = {d.id for d in optional}
+        hits = vector_index.search_similar(
+            db, project_id, "ref_doc", query_text, top_k=max(8, top_k * 3))
+        for h in hits:
+            if h.source_id not in optional_ids:
+                continue
+            if h.source_id not in vec_top or h.score > vec_top[h.source_id]:
+                vec_top[h.source_id] = h.score  # 块级得分聚合到文档级：取最好块
+        for i, sid in enumerate(sorted(vec_top, key=lambda k: -vec_top[k]), 1):
+            vec_rank[sid] = i
+    except Exception as e:  # noqa: BLE001
+        print(f"[reference_crud.pick_relevant] 向量通道跳过: {type(e).__name__}: {str(e)[:80]}")
+
+    # ---- RRF 融合 ----
+    _RRF_K = 60
+
+    def _rrf(doc_id: str) -> float:
+        s = 0.0
+        if doc_id in kw_rank:
+            s += 1.0 / (_RRF_K + kw_rank[doc_id])
+        if doc_id in vec_rank:
+            s += 1.0 / (_RRF_K + vec_rank[doc_id])
+        return s
+
+    picked = sorted(optional, key=lambda d: (-_rrf(d.id), d.created_at or _now()))
+    candidates = [d for d in picked if _rrf(d.id) > 0][: max(top_k * 3, top_k + 4)]
+
+    # ---- A4：rerank 重排（RRF 候选 → 交叉编码器逐对打分 → 取 top_k）----
+    # RRF 只保证「大致相关」；bge-reranker 区分度实测高一个量级
+    # （0.128 / 0.035 / 0.010 / 0.000 vs bge-m3 余弦 0.5174/0.5166/0.5141）。
+    # 失败/无 key 静默降级为 RRF 原序，绝不阻断生成。
+    rerank_scores: dict[str, float] = {}
+    if len(candidates) > top_k:
+        try:
+            from app.services import rerank_client
+            order = rerank_client.rerank(
+                query_text, [d.summary or d.filename or "" for d in candidates], db=db)
+            ranked = [candidates[it["index"]] for it in order]
+            for it in order:
+                rerank_scores[candidates[it["index"]].id] = it["relevance_score"]
+            # rerank 返回完整的候选序；取前 top_k（分数为 0 的仍保留，交由 RRF 序兜底）
+            picked = ranked[: max(0, top_k)]
+        except Exception as e:  # noqa: BLE001
+            print(f"[reference_crud.pick_relevant] rerank 跳过: {type(e).__name__}: {str(e)[:80]}")
+            picked = candidates[: max(0, top_k)]
+    else:
+        picked = candidates[: max(0, top_k)]
 
     # 一份都没命中时，退回最早上传的一份保底——总比完全没有世界观参考强
     if not picked and optional:
@@ -575,7 +660,7 @@ def pick_relevant(
         blocks.append(f"【本篇已写剧情摘要】\n{text[:per_doc_chars * 2]}")
         detail.append({"id": d.id, "filename": d.filename, "score": None, "reason": "本篇剧情摘要（必备）"})
 
-    score_map = {d.id: s for s, d in scored}
+    kw_score_of = {d.id: s for s, d in kw_scored}
     for d in picked:
         text = (d.content_text or "").strip()
         if not text:
@@ -584,10 +669,16 @@ def pick_relevant(
         if len(text) > per_doc_chars:
             clipped += f"\n…（全文 {len(text)} 字，此处截取前 {per_doc_chars} 字）"
         blocks.append(f"【参考资料：{d.filename}】\n{clipped}")
+        channels = [c for c, hit in (("关键词", d.id in kw_rank), ("向量", d.id in vec_rank)) if hit]
         detail.append({
             "id": d.id, "filename": d.filename,
-            "score": score_map.get(d.id, 0),
-            "reason": "关键词相关性命中",
+            "score": round(_rrf(d.id), 6),
+            "kw_score": kw_score_of.get(d.id, 0.0),
+            "vec_score": round(vec_top.get(d.id, 0.0), 4),
+            "rerank_score": (round(rerank_scores[d.id], 4)
+                             if d.id in rerank_scores else None),
+            "channels": channels or ["保底"],
+            "reason": ("+".join(channels) + " 相关性命中") if channels else "保底（无命中）",
         })
 
     # 未入选的只留一行索引，让模型知道「还有这些资料存在」

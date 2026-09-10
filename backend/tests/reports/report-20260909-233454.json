@@ -1,0 +1,72 @@
+{
+  "time": "2026-09-09T23:34:54.688859",
+  "model": "Qwen/Qwen3.8-Flash-Next",
+  "model_id": "ef4047c415dd4db3b89bcde93daa06c5",
+  "target_words": 2500,
+  "gen_secs": 25.0,
+  "ttfc": 1.7,
+  "metrics": {
+    "chars": 1611,
+    "punct_density": 0.119,
+    "max_no_punct_len": 18,
+    "latin_count": 0,
+    "max_3gram_repeat": 6,
+    "top_3gram": [
+      [
+        "铜牌，",
+        6
+      ],
+      [
+        "把铜牌",
+        5
+      ],
+      [
+        "了一下",
+        4
+      ],
+      [
+        "铜牌。",
+        4
+      ],
+      [
+        "那符号",
+        4
+      ]
+    ],
+    "para_head_repeat": [
+      [
+        "沈砚",
+        17
+      ],
+      [
+        "铜牌",
+        8
+      ],
+      [
+        "阿生",
+        5
+      ]
+    ],
+    "error_markers": []
+  },
+  "humanize_score": 100.0,
+  "events": [
+    "start",
+    "context",
+    "validate",
+    "saved",
+    "ingest_start",
+    "done"
+  ],
+  "stopped": null,
+  "saved": {
+    "chapter_id": "656fcbac8d0b41069c142dba60e502cc",
+    "word_count": 1811
+  },
+  "memory_ok": true,
+  "passed": false,
+  "fails": [
+    "字数达标（1611 字，阈值 ≥1800）"
+  ],
+  "warns": []
+}

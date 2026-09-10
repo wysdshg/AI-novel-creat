@@ -1,0 +1,62 @@
+{
+  "time": "2026-09-09T21:39:59.493548",
+  "model": "Qwen3.5-122B-A10B",
+  "model_id": "ef4047c415dd4db3b89bcde93daa06c5",
+  "target_words": 2500,
+  "gen_secs": 25.2,
+  "ttfc": 1.6,
+  "metrics": {
+    "chars": 1711,
+    "punct_density": 0.129,
+    "max_no_punct_len": 16,
+    "latin_count": 0,
+    "max_3gram_repeat": 16,
+    "top_3gram": [
+      [
+        "。沈砚",
+        16
+      ],
+      [
+        "。孩子",
+        9
+      ],
+      [
+        "”沈砚",
+        9
+      ],
+      [
+        "”孩子",
+        6
+      ],
+      [
+        "。”沈",
+        5
+      ]
+    ],
+    "error_markers": []
+  },
+  "humanize_score": 100.0,
+  "events": [
+    "start",
+    "context",
+    "stopped",
+    "validate",
+    "saved",
+    "ingest_start",
+    "done"
+  ],
+  "stopped": {
+    "reason": "detected_repetition",
+    "chars": 3760
+  },
+  "saved": {
+    "chapter_id": "9ac0e4a7421146b0bc8b33a1687769fb",
+    "word_count": 1851
+  },
+  "memory_ok": true,
+  "passed": false,
+  "fails": [
+    "字数达标（1711 字，阈值 ≥1800）",
+    "无复读机（3-gram 最大重复 16 次，阈值 ≤6）"
+  ]
+}

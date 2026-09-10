@@ -49,6 +49,17 @@ def delete_reference(project_id: str, doc_id: str, db: Session = Depends(get_ses
     return ok({"deleted": doc_id})
 
 
+@router.post("/projects/{project_id}/references/reindex", summary="重建参考文档向量索引")
+def reindex_references(project_id: str, db: Session = Depends(get_session)):
+    """对存量参考文档一次性补建向量索引（幂等）。
+
+    配置硅基流动 key 后调用一次即可；无 key 时 chunks=0 不报错。
+    之后上传/导入的文档由生命周期钩子自动索引，无需再手动触发。
+    """
+    from app.services import vector_index
+    return ok(vector_index.reindex_project_references(db, project_id))
+
+
 @router.put("/projects/{project_id}/references/{doc_id}", summary="重命名参考文档")
 def update_reference(project_id: str, doc_id: str, body: ReferenceDocUpdate, db: Session = Depends(get_session)):
     doc = svc.update_reference(db, project_id, doc_id, body.filename)

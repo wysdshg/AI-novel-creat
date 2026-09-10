@@ -426,7 +426,7 @@ const onSelectConversation = (id) => {
 const onDeleteConversation = async (c) => {
   try {
     await ElMessageBox.confirm(
-      `删除对话「${c.title}」？仅从列表移除，不影响已产生的讨论历史。`,
+      `删除对话「${c.title}」？该对话的历史消息将一并删除，无法恢复。`,
       '删除对话',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' }
     )

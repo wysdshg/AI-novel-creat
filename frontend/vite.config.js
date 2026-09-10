@@ -12,7 +12,8 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        // 默认 8000（宿主）；沙箱联调可用 VITE_API_TARGET=http://localhost:8010 覆盖
+        target: process.env.VITE_API_TARGET || 'http://localhost:8000',
         changeOrigin: true,
         // 两阶段查询（Pass1 + 加载参考 + Pass2）常需 60~120s，
         // http-proxy 默认 timeout 不够长会导致前端收到 "BodyStreamBuffer was aborted"。

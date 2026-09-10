@@ -412,27 +412,11 @@ const onGenerate = async () => {
           ? '检测到重复循环，正文已截断'
           : (data?.reason || '生成被中断')
       } else if (event === 'ingest_start') {
+        // 后端摄取为后台线程异步执行，无独立完成事件；done 即代表正文已落库
         ingestState.value = data?.async
           ? { type: 'info', text: '记忆抽取后台进行中（不阻塞）' }
           : { type: 'warning', text: '正在抽取本章记忆…' }
       } else if (event === 'saved') {
-        // 记录生成的章节 ID：后续「重新生成」将覆盖它，而不是新建一章（问题3）
-        lastChapterId.value = data?.chapter_id || lastChapterId.value
-      } else if (event === 'ingest') {
-        if (data.error) {
-          ingestState.value = { type: 'danger', text: '记忆抽取失败' }
-        } else {
-          const bits = []
-          if (data.memory_id) bits.push('记忆已存')
-          if (data.directions_pushed) bits.push(`${data.directions_pushed} 条走向已推送`)
-          if ((data.new_entities || []).length) bits.push(`${data.new_entities.length} 个新实体待确认`)
-          if (data.stage_compressed) bits.push('阶段摘要已压缩')
-          ingestState.value = {
-            type: data.fallback ? 'warning' : 'success',
-            text: (data.fallback ? '兜底抽取：' : '') + (bits.join(' · ') || '已处理'),
-          }
-        }
-      } else if (event === 'done') {
         wordCount.value = data.word_count || streamText.value.length
         lastChapterId.value = data?.chapter_id || lastChapterId.value
         result.value = true

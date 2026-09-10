@@ -1,0 +1,71 @@
+{
+  "time": "2026-09-09T21:41:55.926863",
+  "model": "Qwen3.5-122B-A10B",
+  "model_id": "ef4047c415dd4db3b89bcde93daa06c5",
+  "target_words": 2500,
+  "gen_secs": 25.8,
+  "ttfc": 1.5,
+  "metrics": {
+    "chars": 2805,
+    "punct_density": 0.122,
+    "max_no_punct_len": 19,
+    "latin_count": 0,
+    "max_3gram_repeat": 11,
+    "top_3gram": [
+      [
+        "”沈砚",
+        11
+      ],
+      [
+        "，像是",
+        11
+      ],
+      [
+        "？”沈",
+        7
+      ],
+      [
+        "阴影里",
+        5
+      ],
+      [
+        "，只是",
+        5
+      ]
+    ],
+    "para_head_repeat": [
+      [
+        "沈砚",
+        24
+      ],
+      [
+        "孩子",
+        6
+      ],
+      [
+        "铜牌",
+        5
+      ]
+    ],
+    "error_markers": []
+  },
+  "humanize_score": 100.0,
+  "events": [
+    "start",
+    "context",
+    "validate",
+    "saved",
+    "ingest_start",
+    "done"
+  ],
+  "stopped": null,
+  "saved": {
+    "chapter_id": "54af1ed560a54f3bb4a4afb3d53be87c",
+    "word_count": 3095
+  },
+  "memory_ok": true,
+  "passed": false,
+  "fails": [
+    "无复读机（3-gram 最大重复 11 次，阈值 ≤6）"
+  ]
+}

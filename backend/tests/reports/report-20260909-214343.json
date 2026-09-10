@@ -1,0 +1,70 @@
+{
+  "time": "2026-09-09T21:43:43.585038",
+  "model": "Qwen3.5-122B-A10B",
+  "model_id": "ef4047c415dd4db3b89bcde93daa06c5",
+  "target_words": 2500,
+  "gen_secs": 20.9,
+  "ttfc": 1.6,
+  "metrics": {
+    "chars": 2566,
+    "punct_density": 0.115,
+    "max_no_punct_len": 21,
+    "latin_count": 0,
+    "max_3gram_repeat": 12,
+    "top_3gram": [
+      [
+        "”沈砚",
+        12
+      ],
+      [
+        "独眼龙",
+        12
+      ],
+      [
+        "”孩子",
+        8
+      ],
+      [
+        "”独眼",
+        7
+      ],
+      [
+        "。”孩",
+        6
+      ]
+    ],
+    "para_head_repeat": [
+      [
+        "沈砚",
+        16
+      ],
+      [
+        "孩子",
+        7
+      ],
+      [
+        "三人",
+        4
+      ]
+    ],
+    "error_markers": []
+  },
+  "humanize_score": 99.6,
+  "events": [
+    "start",
+    "context",
+    "validate",
+    "saved",
+    "ingest_start",
+    "done"
+  ],
+  "stopped": null,
+  "saved": {
+    "chapter_id": "b6eb043a9a664c4e8a51c0e2a89fe34f",
+    "word_count": 2716
+  },
+  "memory_ok": true,
+  "passed": true,
+  "fails": [],
+  "warns": []
+}

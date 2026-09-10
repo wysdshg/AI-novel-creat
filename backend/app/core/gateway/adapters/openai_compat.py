@@ -59,13 +59,19 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         vendor = (self.config.get("vendor") or "").lower()
         model = (self.config.get("model_name") or "").lower()
         api_base = (self.config.get("api_base") or "").lower()
-        # 安全网：ModelScope 的 Qwen3.5 开 thinking 后，流式下正文 content 为空，
+        # 安全网：ModelScope 的 Qwen3.x 开 thinking 后，流式下正文 content 为空，
         # 或把英文 reasoning（harmless/helpful/safe 之类 RLHF 推理词）塞进 content 污染正文、
         # 导致正文变成「无标点长段 + 英文推理词 + 同义反复循环」。
         # 关键：默认模型在库里标的是 vendor="custom"（不是 "qwen"），但端点就是 ModelScope 的
-        # Qwen3.5，因此按 model+api_base 命中，而非仅按 vendor=="qwen"（否则该组合被完全绕过）。
-        _broken_ms_qwen35 = ("qwen3.5" in model and "modelscope" in api_base)
-        if _broken_ms_qwen35:
+        # Qwen3.x，因此按 model+api_base 命中，而非仅按 vendor=="qwen"（否则该组合被完全绕过）。
+        # 2026-09-09 放宽：qwen3.5 字面匹配 → qwen3.x 正则（Qwen3.8-Flash-Next 实测同病：
+        # 无标点长段 1870 字、首字 407s）。
+        # 2026-09-09 二改：强关改为「仅默认值」——调用方显式传 enable_thinking 时尊重之
+        # （路由层 _content_only_stream 已保证 reasoning 不进正文，此处不再二次覆盖）。
+        _broken_ms_qwen35 = (
+            bool(re.search(r"qwen3\.\d", model)) and "modelscope" in api_base
+        )
+        if _broken_ms_qwen35 and enable_thinking is None:
             enable_thinking = False
 
         max_tokens = params.get("max_tokens", self.config.get("max_tokens", 6000))
@@ -185,6 +191,14 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         base = (self.config.get("api_base", "") or "").rstrip("/")
         url = f"{base}/chat/completions"
         req = _build_request(url, payload, self.config.get("api_key", ""))
+        # 2026-09-10 兜底：魔搭(ModelScope)端点的 GLM-5.3-Flash 实测把全部输出
+        # （含正文）塞进 reasoning_content，content 恒为空（773 帧 content_len=0，
+        # 与 NVIDIA NIM GLM-5.2 同款行为；thinking.type 字段被魔搭静默忽略，关不掉）。
+        # chat() 与 stream_with_thinking() 都有 reasoning 兜底，唯独本方法漏了，
+        # 导致章节生成 0 chunk（流"正常"走完、正文空白）。Qwen3.x 不受影响：
+        # 它 content 正常出正文，_content_seen=True 永远进不了兜底分支。
+        _reasoning_buffer = []
+        _content_seen = False
         try:
             with urllib.request.urlopen(req, timeout=240) as resp:
                 for raw in resp:
@@ -197,12 +211,29 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
                     try:
                         obj = json.loads(data)
                         delta = obj["choices"][0]["delta"]
-                        # content 即正文；reasoning/reasoning_content 是思考过程，忽略
+                        reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
                         piece = delta.get("content") or ""
                         if piece:
+                            _content_seen = True
                             yield piece
+                        elif reasoning:
+                            _reasoning_buffer.append(reasoning)
                     except Exception:  # noqa: BLE001
                         continue
+            if not _content_seen and _reasoning_buffer:
+                fallback = "".join(_reasoning_buffer)
+                # Qwen3.x 式英文分析泄漏（harmless/helpful 等 RLHF 推理词）不能当正文，
+                # 英文占比 >15% 时拒绝兜底（与 stream_with_thinking 同款防线）
+                english_tokens = re.findall(r"[A-Za-z]{3,}", fallback)
+                if len("".join(english_tokens)) > len(fallback) * 0.15:
+                    print(
+                        "[openai_compat.stream] 正文为空且 reasoning 主要为英文分析，"
+                        f"疑似 thinking 泄漏，拒绝兜底输出。model={self.config.get('model_name')!r}",
+                        flush=True,
+                    )
+                    yield "\n[生成异常：模型仅返回思考分析，未输出正文。请尝试关闭思考模式或更换模型。]"
+                else:
+                    yield fallback
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "ignore")
             yield f"\n[模型调用失败 status={e.code}: {detail[:200]}]"

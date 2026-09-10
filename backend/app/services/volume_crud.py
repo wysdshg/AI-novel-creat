@@ -3,7 +3,7 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from app.models.orm import VolumeORM
+from app.models.orm import VolumeORM, ArticleORM, ChapterORM
 from app.schemas.volume import VolumeCreate, VolumeUpdate
 
 
@@ -54,6 +54,11 @@ def delete_volume(db: Session, project_id: str, volume_id: str) -> bool:
     o = get_volume(db, project_id, volume_id)
     if not o:
         return False
+    # 级联删除该卷下所有篇及其章节，避免孤儿数据
+    article_ids = [r[0] for r in db.query(ArticleORM.id).filter_by(volume_id=volume_id).all()]
+    if article_ids:
+        db.query(ChapterORM).filter(ChapterORM.article_id.in_(article_ids)).delete()
+        db.query(ArticleORM).filter(ArticleORM.id.in_(article_ids)).delete()
     db.delete(o)
     db.commit()
     return True

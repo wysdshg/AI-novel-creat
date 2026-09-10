@@ -402,7 +402,13 @@ def chat(
         # 按需加载目录：把「可用参考文件清单」作为稳定前缀挂到 system（配合 Ollama cache_prompt 缓存，
         # 后续轮次前缀 KV 复用）。AI 仅在需要时通过 LOAD_REFS:<ids> 请求加载具体正文，避免全量塞爆窗口。
         try:
-            catalog = ref_svc.build_catalog(gen_db, project_id, article_id=chapter_id, include_global=True)
+            # 目录按「篇」维度过滤；章线程需先从章反查所属篇（孤儿章则不过滤）
+            article_id = None
+            if chapter_id:
+                ch = gen_db.query(ChapterORM).filter_by(id=chapter_id).first()
+                if ch:
+                    article_id = ch.article_id
+            catalog = ref_svc.build_catalog(gen_db, project_id, article_id=article_id, include_global=True)
             catalog_text = ref_svc.format_catalog_prompt(catalog, include_global=True)
             if catalog_text:
                 sys_prompt = (
@@ -675,7 +681,7 @@ def global_chat(
     # 提前写入后，loadDiscussion 能立刻拉到这条消息。
     if last_user_content:
         try:
-            add_message(db, GLOBAL_PROJECT_ID, "user", last_user_content)
+            add_message(db, GLOBAL_PROJECT_ID, "user", last_user_content, conversation_id=body.conversation_id)
         except Exception:
             pass  # 持久化失败不阻断主流程
 
@@ -853,6 +859,7 @@ def global_chat(
                         full,
                         thinking="".join(assistant_thinking) or None,
                         meta={"enable_thinking": bool(want_thinking), "global_chat": True},
+                        conversation_id=body.conversation_id,
                     )
             except Exception as e:  # noqa: BLE001
                 print(f"[discussion/global-chat] 持久化失败: {e}")

@@ -70,3 +70,8 @@ class Workflow(WorkflowBase):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class WorkflowRunRequest(BaseModel):
+    """执行工作流：inputs 为 start 节点声明的输入变量值。"""
+    inputs: Dict[str, Any] = Field(default_factory=dict)

@@ -310,6 +310,15 @@ def ingest_chapter(
         except Exception as e:  # noqa: BLE001
             print(f"[ingestion] 写篇章摘要失败: {e}")
 
+    # ---------- 3.5 向量索引同步（A 线检索升级，失败静默不阻断） ----------
+    try:
+        from app.services import vector_index
+        vec_stats = vector_index.sync_after_ingest(
+            db, project_id, result.get("memory_id") or "", chapter.article_id)
+        result["vector_index"] = vec_stats
+    except Exception as e:  # noqa: BLE001
+        print(f"[ingestion] 向量索引同步跳过: {type(e).__name__}: {e}")
+
     # ---------- 4. 走向卡片推送到对话区 ----------
     if push_directions is None:
         push_directions = bool(app_config.get(db, app_config.KEY_PUSH_DIRECTIONS, True))

@@ -20,6 +20,7 @@ import GlobalReferenceView from '@/views/GlobalReferenceView.vue'
 import SettingView from '@/views/SettingView.vue'         // 全局设定库
 import CustomSkillView from '@/views/CustomSkillView.vue' // 全局写作 SKILL
 import WorkflowView from '@/views/WorkflowView.vue'       // 全局工作流
+import WorkflowEditorView from '@/views/WorkflowEditorView.vue' // 工作流画布编辑器
 import SkillListView from '@/views/SkillListView.vue'     // 数据库·技能库（按小说隔离的角色技能表）
 
 // =========================================================================
@@ -47,6 +48,7 @@ const routes = [
       { path: 'chat',     name: 'chat',     component: ChatView,     meta: { title: '对话',     tab: 'parent' } },
       { path: 'overview', name: 'overview', component: OverviewView, meta: { title: '概览',     tab: 'parent' } },
       { path: 'workflow', name: 'workflow', component: WorkflowView, meta: { title: '工作流',   tab: 'parent' } },
+      { path: 'workflow-editor/:id', name: 'workflow-editor', component: WorkflowEditorView, meta: { title: '工作流编辑', hideTopNav: true } },
       { path: 'database', name: 'database', redirect: { name: 'database-character' }, meta: { title: '数据库', tab: 'parent' } },
       { path: 'reference', name: 'reference', component: ReferenceView, meta: { title: '参考文档', tab: 'parent' } },
       // 「参考资料」只放在左侧边栏，不出现在顶部 tab（见 #2/#7）

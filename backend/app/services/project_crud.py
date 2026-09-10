@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 from app.models.orm import (
     ProjectORM, CharacterORM, SkillORM, RelationORM, FactionORM,
     ForeshadowORM, ChapterORM, DiscussionMessageORM, DirectionORM, OutlineORM,
+    VolumeORM, ArticleORM, ReferenceDocORM, LocationORM,
+    ChapterMemoryORM, StageSummaryORM, DiscussionLoadLogORM,
 )
 
 
@@ -80,9 +82,12 @@ def update_project(db: Session, project_id: str, data: dict) -> dict | None:
 
 
 # 删除作品时一并清空的关联表（按 project_id 过滤，互不影响其他作品）
+# 4 级结构相关（卷/篇/章）与参考、记忆、阶段摘要、加载日志均在列，避免孤儿行。
 _RELATED = [
-    CharacterORM, SkillORM, RelationORM, FactionORM,
+    CharacterORM, SkillORM, RelationORM, FactionORM, LocationORM,
     ForeshadowORM, ChapterORM, DiscussionMessageORM, DirectionORM, OutlineORM,
+    VolumeORM, ArticleORM, ReferenceDocORM,
+    ChapterMemoryORM, StageSummaryORM, DiscussionLoadLogORM,
 ]
 
 
@@ -90,6 +95,13 @@ def delete_project(db: Session, project_id: str) -> bool:
     orm = db.get(ProjectORM, project_id)
     if orm is None:
         return False
+    # 向量块（vector_chunks + vec_index）没有外键，必须显式清，否则成为孤儿
+    # （2026-09-10 实测：删作品后残留 10 块）。
+    try:
+        from app.services import vector_store
+        vector_store.remove_project_index(db, project_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"[project_crud] 清理向量块跳过: {type(e).__name__}: {e}")
     for table in _RELATED:
         db.query(table).filter(table.project_id == project_id).delete()
     db.delete(orm)
