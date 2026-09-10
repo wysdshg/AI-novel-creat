@@ -66,10 +66,10 @@ const routes = [
 
       // —— 其他视图（保留可达，但不展示在顶部 tab，便于侧栏 / 深链）——
       { path: 'location',    name: 'location',    component: LocationView,    meta: { title: '地点库',     hideTab: true } },
-      // 「配置对话」(config-chat) 已归档到 src/_deprecated/（2026-09-10，用户拍板）：
+      // 「配置对话」(config-chat) 原页面已于 2026-09-10 删除（Phase 3.1 死代码清理）：
       // 该页 316 行但侧栏无入口、长期不可达；其核心能力（/角色 /地点 等斜杠指令 +
       // 自然语言入库）已由 ChatInput.vue 承载（同样调 commandApi + parseSlashCommands），
-      // 故归档只摘掉独立页面入口，能力未丢。需要复原时见 _deprecated/README.md。
+      // 故删除的是不可达的重复 UI，能力未丢。历史版本见 git bd74768。
       { path: 'foreshadow',  name: 'foreshadow',  component: ForeshadowView,  meta: { title: '线索 / 伏笔', hideTab: true } },
       // 走向推荐（direction）已随模块删除：ingestion 每章推的走向卡片走商讨面板，
       // 不设独立表/页面（2026-09-10，见 docs/03 §1）。

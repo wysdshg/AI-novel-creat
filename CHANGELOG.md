@@ -6,6 +6,11 @@
 ---
 
 ## 2026-09-10
+- **Phase 3.1 死代码清理（前端 638 行 + 后端 stubs 收窄）**：
+  - **前端删除 11 个文件 / 638 行**（每个都先 grep 实证 0 引用再动）：`src/_deprecated/` 整目录 4 文件 448 行（`ChapterView`/`ConfigChatView`/`DiscussionView` + 其 README；config-chat 的能力已由 `ChatInput.vue` 承载，删的是不可达重复 UI，历史版本见 `git bd74768`）；3 个 0 引用组件 `ForeshadowTimeline.vue`、`RelationGraph.vue`（纯 `el-empty` 占位）、`ChapterElementsPanel.vue`（无调用方的薄包装）共 78 行；`TemplateDialog.vue` 76 行（同 0 引用，且含伪功能、被 `TemplateView` 的「规划中」页取代）；3 个 0 引用 API 模块 `api/foreshadow.js`、`api/memory.js`（与 `api/assist.js` 里的 `memoryApi` 重复且无人 import）、`api/template.js` 共 36 行。
+  - **后端 `services/stubs.py` 收窄**：原 15 个函数中 **13 个实测 0 引用**（`create_project`/`list_projects`/`list_characters`/`create_character`/`run_command`/`list_chapters`/`list_discussion`/`clear_discussion`/`list_models`/`create_model`/`test_model`/`compress_memory`/`get_memory_summary`——各业务模块早已由真实 CRUD 实现，这些桩是脚手架残留），文件从 106 行缩到 39 行；仅保留仍被 `routers/template.py` 调用的 `list_templates` / `generate_outline`。**`outlines` 路由按 09-09 决策保留冻结，未动**（路由仍 139 条）。
+  - **⚠️ 过程中踩中 04-A8（沙箱删文件连带清空同级目录）**：`git rm` 删 `components/workspace/` 内 1 个文件 → **整个目录 7 个文件消失**；`Remove-Item -Recurse` 删 `_deprecated/` → **连 `views/ store/ router/ layout/ utils/ styles/` 一起没了，累计误删 31 个文件**。全部源码都在 git 里，`git restore --source=HEAD --worktree --staged frontend/src/` 秒级完整还原（工作区内容从未真正丢失）。**已把处置铁律写进 04-A8**：删文件用单文件 `rm -f`；要让 git 记录删除用 `git update-index --force-remove`（纯索引操作、完全不碰文件系统）；删完立刻 `find -type f | wc -l` 核对；发现误删先 `git restore`，**切不可 `git add -A`**。
+  - **验证**：后端单测 **131 passed**（清理前基线 131，零回归）；`main.py` 可完整加载、路由 139 条不变；前端 `vite build` 通过（1735 modules，7.89s）；起 8010 临时实例真机冒烟——`/health`、`/templates`（返回 7 条模板）及 `/projects` `/settings` `/global-skills` `/workflows` `/models` `/references/global` `/projects/x/outlines` **全 200**；验证后确认 PID 身份（94MB python.exe）再 taskkill，**用户 8000 后端全程未受影响**。
 - **测试成本优化：写后摄取分阶段开关 + e2e 多轮省调用（用户拍板：fallback 兜底 / 默认全不动 / 第1轮按档 2~N 轮 none）**：
   - **问题**：跑一次全链路要 **3 次 LLM 调用**（正文 1 + 记忆抽取 1 + 概览聚合·篇级 1）。验证「文笔稳定性」时后两次对目标零贡献——跑 5 轮 = 15 次调用，其中 10 次白烧。（阶段压缩不满 10 章不触发，本就免费；去AI味是本地算的，不调模型。）
   - **新增 config 键**（默认全 True = 行为与改造前 100% 一致，零回归）：`memory.extract_enabled`（关掉改走 `fallback_extract` 规则兜底）、`memory.aggregate_overview`（关掉篇级概览改纯拼接）。

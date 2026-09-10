@@ -1,91 +1,20 @@
-"""全模块业务桩（placeholder）。
+"""套路模板模块桩（placeholder）。
 
-约定：所有函数接收 project_id 等业务参数，返回 dict / list（与 schema 对齐）。
-脚手架阶段不接数据库与模型，仅返回示意数据，并统一标记 TODO。
-真实实现后，routers 不需改动调用方式，仅替换本文件函数体。
+⚠️ 本文件在 Phase 3.1（2026-09-10）已从「全模块业务桩」收窄为**仅套路模板**：
+原有 15 个函数中 13 个已确认 0 引用（各业务模块均已由真实 CRUD 实现），
+已删除；保留的这两个仍被 `routers/template.py` 调用。
+
+套路模板模块本身处于**冻结**状态（见 docs/03 §1）——7 条硬编码模板
+题材绑定、不可编辑，与「题材无关」原则冲突，待设计定型后重做。
 """
 import uuid
-from datetime import datetime
 
 
 def _pid() -> str:
     return uuid.uuid4().hex
 
 
-# ---------- 作品 ----------
-def create_project(payload: dict) -> dict:
-    # TODO: 建表隔离（§1），落库 projects
-    return {"id": _pid(), "chapter_count": 0, "created_at": datetime.utcnow().isoformat(), **payload}
-
-
-def list_projects() -> list:
-    # TODO: 查询 projects 表
-    return []
-
-
-# ---------- 资料库 ----------
-def list_characters(project_id: str) -> list:
-    # TODO: 查询 characters 表（应用表前缀隔离）
-    return []
-
-
-def create_character(project_id: str, payload: dict) -> dict:
-    # TODO: 写入 characters 表 + 审计日志
-    return {"id": _pid(), "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(), **payload}
-
-
-def run_command(project_id: str, payload: dict) -> dict:
-    # TODO: 指令解析引擎（正则+语义识别）→ 路由到对应 CRUD → 可选 dry_run
-    return {"intent": None, "changes": [], "clarification": "指令解析引擎待接入"}
-
-
-# ---------- 章节 / 商讨 ----------
-def list_chapters(project_id: str) -> list:
-    # TODO: 查询 chapters 表
-    return []
-
-
-def list_discussion(project_id: str) -> list:
-    # TODO: 读取临时商讨缓存（Redis 或 discussion_messages）
-    return []
-
-
-def clear_discussion(project_id: str) -> None:
-    # TODO: 清空临时商讨缓存
-    return None
-
-
-# ---------- 模型网关 ----------
-def list_models() -> list:
-    # TODO: 查询 model_configs 表
-    return []
-
-
-def create_model(payload: dict) -> dict:
-    # TODO: 加密存储 api_key，落库 model_configs
-    return {"id": _pid(), **payload}
-
-
-def test_model(payload: dict) -> dict:
-    # TODO: 通过 gateway/registry 获取适配器并 test_connection
-    return {"ok": False, "latency_ms": 0, "msg": "模型适配器待接入"}
-
-
-# ---------- 记忆压缩 ----------
-def compress_memory(project_id: str, chapter_id: str) -> dict:
-    # TODO: 调用 memory 角色模型做结构化压缩
-    return {"chapter_no": 0, "core_event": "", "character_states": [],
-            "new_foreshadows": [], "emotion_shift": "", "mainline_progress": ""}
-
-
-def get_memory_summary(project_id: str) -> dict:
-    # TODO: 取最近3章详细 + 更早极简大事记
-    return {"recent": [], "events": []}
-
-
-# ---------- 伏笔 ----------
-# ---------- 套路模板 ----------
+# ---------- 套路模板（冻结中，返回内置示意模板）----------
 def list_templates() -> list:
     # TODO: 返回内置模板库（秘境夺宝/宗门大比/…）
     return [
