@@ -6,6 +6,14 @@
 ---
 
 ## 2026-09-10
+- **Phase 3.2 合并 `discussion.py` 两处 80 行重复（两阶段 LOAD_REFS 流式）**：
+  - `/discussion/chat` 与 `/discussion/global-chat` 里**各存一份**约 80 行的两阶段参考加载 + 流式生成逻辑，**唯一差异只是日志前缀**——任一处修 bug 漏改另一处就是潜在缺陷，故抽成 `_stream_two_phase()`（`discussion.py` **896→859 行**）。
+  - **接口设计**：`assistant_text` / `assistant_thinking` 由调用方**传引用**进去追加——调用方 `finally` 里要用它们持久化落库，传引用比返回值再拆包更稳（也避免合并后漏收集导致「对话没存上」）；返回值是观测增量 dict，调用方 `obs.update(...)` 后落 `discussion_load_logs`。
+  - **顺带清掉两处已失效的局部赋值**（`ref_selector` 原先在两个入口各建一次，合并后统一在 helper 内解析）。
+  - **新增 `tests/unit/test_discussion_stream.py` 13 用例**：用假适配器直接驱动生成器，锁死 4 条分支——短路（Pass1 即答，只 1 次调用）/ 两阶段（refs 事件 + 流式）/ Pass1 异常降级单次流式 / 无 `chat` 能力降级；外加思考内容透传、**LOAD_REFS 指令泄漏拦截**（模型偶发把协议指令写进正文）、观测 dict 三类取值。
+  - **踩坑**：`LOAD_REFS`/`LOAD_SETTING` 正则只认**十六进制 id**（`[0-9a-f,\s]+`）。测试里用 `doc1`/`ghost`/`d1` 这类字母组合会被**静默忽略**（不报错、当成"模型没请求"）→ 首轮 3 例失败，换 `aa11`/`cc33` 后全过。**教训已记**：构造假 marker 数据必须用 hex id，否则「功能没生效」实为「id 根本没被解析」。
+  - **真机验证**（8010 临时实例，用户 8000 全程未动）：① 全局对话短路路径 `context → chunk → done`（单次调用）；② 全局对话**两阶段路径** `context → refs（实载「古代官场·路级官僚体系」+「古代·官员俸禄与财富参考」2 份）→ chunk×N`，回答正确引用路级品级（正四品/常、从三品/要路）与年俸（280~840 两）；③ 项目商讨 `context → chunk → done`。临时作品已删除（作品数归 0）。
+  - **全量单测 144 passed**（131 + 13 新增，零回归）；路由仍 139 条。
 - **Phase 3.1 死代码清理（前端 638 行 + 后端 stubs 收窄）**：
   - **前端删除 11 个文件 / 638 行**（每个都先 grep 实证 0 引用再动）：`src/_deprecated/` 整目录 4 文件 448 行（`ChapterView`/`ConfigChatView`/`DiscussionView` + 其 README；config-chat 的能力已由 `ChatInput.vue` 承载，删的是不可达重复 UI，历史版本见 `git bd74768`）；3 个 0 引用组件 `ForeshadowTimeline.vue`、`RelationGraph.vue`（纯 `el-empty` 占位）、`ChapterElementsPanel.vue`（无调用方的薄包装）共 78 行；`TemplateDialog.vue` 76 行（同 0 引用，且含伪功能、被 `TemplateView` 的「规划中」页取代）；3 个 0 引用 API 模块 `api/foreshadow.js`、`api/memory.js`（与 `api/assist.js` 里的 `memoryApi` 重复且无人 import）、`api/template.js` 共 36 行。
   - **后端 `services/stubs.py` 收窄**：原 15 个函数中 **13 个实测 0 引用**（`create_project`/`list_projects`/`list_characters`/`create_character`/`run_command`/`list_chapters`/`list_discussion`/`clear_discussion`/`list_models`/`create_model`/`test_model`/`compress_memory`/`get_memory_summary`——各业务模块早已由真实 CRUD 实现，这些桩是脚手架残留），文件从 106 行缩到 39 行；仅保留仍被 `routers/template.py` 调用的 `list_templates` / `generate_outline`。**`outlines` 路由按 09-09 决策保留冻结，未动**（路由仍 139 条）。

@@ -243,6 +243,107 @@ def _build_entity_suggestion(db: Session, project_id: str, user_text: str, ai_te
     return {"items": items} if items else None
 
 
+def _stream_two_phase(adapter, messages, *, want_thinking, temperature, tag,
+                      assistant_text, assistant_thinking):
+    """两阶段按需参考加载 + 流式生成（`/discussion/chat` 与 `/discussion/global-chat` 共用）。
+
+    ⚠️ 这是**同步生成器**，由调用方 `yield from` 消费（FastAPI StreamingResponse
+    接受同步生成器）。产出 SSE 事件字符串：`thinking` / `refs` / `chunk`。
+
+    文本与思考内容**追加进调用方传入的 list**（`assistant_text` / `assistant_thinking`），
+    因为调用方在 `finally` 里要用它们持久化——传引用而非返回值，避免调用方再拆包。
+
+    返回观测增量 dict（`load_ref_ids` / `ref_loaded` / `short_circuited` / …），
+    由调用方 merge 进 `obs` 后落库。
+
+    设计（详见 docs/05 与 04 相关条目）：
+    - **Pass1**：非流式、思考开关同用户偏好，让模型决定要不要参考资料
+      （输出 `LOAD_REFS:<ids>` / `LOAD_SETTING:<ids>`）还是直接作答。
+      只有被选中的文件正文才会进上下文，避免全量塞爆窗口；无需参考时仅 1 次调用。
+    - **Pass2**：仅当确有参考/设定被加载时才发起，流式输出最终回复。
+    - 抽出本函数前，这段逻辑在 `chat` 与 `global_chat` 里**各存在一份**（约 80 行），
+      唯一差异是日志前缀。任一处修 bug 漏改另一处就是潜在缺陷，故合并。
+    """
+    def _sse(event: str, payload: dict) -> str:
+        return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    def _emit_thinking():
+        """按用户偏好流式产出思考内容（适配器不支持则跳过）。"""
+        if want_thinking and hasattr(adapter, "stream_thinking"):
+            for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
+                assistant_thinking.append(t)
+                yield _sse("thinking", {"text": t})
+
+    def _emit_text():
+        """流式产出正文；`_strip_load_refs` 拦掉模型偶发漏出的 LOAD_REFS 指令行。"""
+        for delta in adapter.stream(messages, temperature=temperature, enable_thinking=want_thinking):
+            clean = _strip_load_refs(delta)
+            if clean:
+                assistant_text.append(clean)
+                yield _sse("chunk", {"text": clean})
+
+    # ---- Pass1：非流式，探询是否需要加载参考 ----
+    first_text = ""
+    if hasattr(adapter, "chat"):
+        try:
+            first_text = adapter.chat(messages, temperature=temperature, enable_thinking=want_thinking)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[{tag}] Pass1 失败，降级单次流式: {e}")
+            first_text = ""
+
+    ref_selector = get_reference_selector()
+    selected_ids = ref_selector.select(first_text) if first_text else None
+    setting_ids = ref_svc.parse_load_setting(first_text) if first_text else None
+
+    if selected_ids or setting_ids:
+        load_ref_ids = list(dict.fromkeys(selected_ids)) if selected_ids else []
+        load_set_ids = list(dict.fromkeys(setting_ids)) if setting_ids else []
+        # 自建 session 取参考/设定正文（铁律：流式生成器内不得用请求级 session）
+        load_db = _db.SessionLocal()
+        try:
+            ref_blocks = ref_svc.fetch_refs_by_ids(load_db, load_ref_ids) if load_ref_ids else []
+            set_blocks = ref_svc.fetch_settings_by_ids(load_db, load_set_ids) if load_set_ids else []
+        finally:
+            load_db.close()
+
+        if ref_blocks or set_blocks:
+            loaded_parts = []
+            for fn, txt in ref_blocks:
+                loaded_parts.append(f"【参考资料：{fn}】\n{txt}")
+            for nm, det in set_blocks:
+                loaded_parts.append(f"【设定库详情：{nm}】\n{det}")
+            messages.append({
+                "role": "user",
+                "content": f"已按你的请求加载以下资料/设定详情，请据此作答：\n\n" + "\n\n".join(loaded_parts),
+            })
+            yield _sse("refs", {
+                "loaded": [fn for fn, _ in ref_blocks] + [nm for nm, _ in set_blocks],
+                "ids": load_ref_ids + load_set_ids,
+            })
+            yield from _emit_thinking()
+            yield from _emit_text()
+            return {"load_ref_ids": load_ref_ids, "load_setting_ids": load_set_ids,
+                    "ref_loaded": bool(ref_blocks), "setting_loaded": bool(set_blocks)}
+        # 选中 id 全部无效：提示后直接作答，避免无限循环
+        messages.append({"role": "user", "content": "你请求的参考资料/设定未能加载（id 无效），请直接作答。"})
+        yield from _emit_thinking()
+        yield from _emit_text()
+        return {"load_ref_ids": load_ref_ids, "load_setting_ids": load_set_ids}
+
+    if first_text:
+        # 模型判断无需参考：Pass1 即最终回答，短路省一次调用
+        clean = _strip_load_refs(first_text)
+        if clean:
+            assistant_text.append(clean)
+            yield _sse("chunk", {"text": clean})
+        return {"short_circuited": True}
+
+    # adapter 无 chat（Pass1 不可用）：退回单次流式（旧行为）
+    yield from _emit_thinking()
+    yield from _emit_text()
+    return {"pass1_failed": True}
+
+
 @router.get("/projects/{project_id}/discussion")
 def get_discussion(
     project_id: str,
@@ -438,9 +539,6 @@ def chat(
         want_thinking = body.enable_thinking if body.enable_thinking is not None else model_cfg["enable_thinking"]
         temperature = body.temperature or model_cfg["temperature"]
 
-        # 参考「选择阶段」策略：默认 marker(A)，未来强 API 可切 toolcall(B)。见 reference_selector。
-        ref_selector = get_reference_selector()
-
         # ---- P0 观测：记录本轮实际加载了哪些设定/参考（不阻塞主流程）----
         obs = {
             "question": _latest_user,
@@ -458,83 +556,13 @@ def chat(
             adapter = get_adapter(model_cfg["vendor"], config)
             logger.info(f'[discussion] 模型={model_cfg["model_name"]} ({model_cfg["vendor"]}) | api_base={(model_cfg["api_base"] or "")[:50]} | thinking={want_thinking}')
 
-            # ---- 按需参考加载（两阶段）----
-            # Pass1：非流式、think=false，让模型决定是否需要参考文件（输出 LOAD_REFS:<ids>）或直接作答。
-            # 只有被选中的文件正文才会进入上下文，避免全量塞爆窗口；无需参考时仅 1 次调用。
-            first_text = ""
-            if hasattr(adapter, "chat"):
-                try:
-                    first_text = adapter.chat(messages, temperature=temperature, enable_thinking=want_thinking)
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"[discussion/chat] Pass1 失败，降级单次流式: {e}")
-                    first_text = ""
-
-            selected_ids = ref_selector.select(first_text) if first_text else None
-            setting_ids = ref_svc.parse_load_setting(first_text) if first_text else None
-
-            if selected_ids or setting_ids:
-                load_ref_ids = list(dict.fromkeys(selected_ids)) if selected_ids else []
-                load_set_ids = list(dict.fromkeys(setting_ids)) if setting_ids else []
-                obs["load_ref_ids"] = load_ref_ids
-                obs["load_setting_ids"] = load_set_ids
-                ref_blocks = ref_svc.fetch_refs_by_ids(gen_db, load_ref_ids) if load_ref_ids else []
-                set_blocks = ref_svc.fetch_settings_by_ids(gen_db, load_set_ids) if load_set_ids else []
-                if ref_blocks or set_blocks:
-                    obs["ref_loaded"] = bool(ref_blocks)
-                    obs["setting_loaded"] = bool(set_blocks)
-                    loaded_parts = []
-                    for fn, txt in ref_blocks:
-                        loaded_parts.append(f"【参考资料：{fn}】\n{txt}")
-                    for nm, det in set_blocks:
-                        loaded_parts.append(f"【设定库详情：{nm}】\n{det}")
-                    loaded = "\n\n".join(loaded_parts)
-                    messages.append({
-                        "role": "user",
-                        "content": f"已按你的请求加载以下资料/设定详情，请据此作答：\n\n{loaded}",
-                    })
-                    yield f"event: refs\ndata: {json.dumps({'loaded': [fn for fn, _ in ref_blocks] + [nm for nm, _ in set_blocks], 'ids': load_ref_ids + load_set_ids}, ensure_ascii=False)}\n\n"
-                    # Pass2：流式生成最终回复（带思考，按用户偏好）
-                    if want_thinking and hasattr(adapter, "stream_thinking"):
-                        for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
-                            assistant_thinking.append(t)
-                            yield f"event: thinking\ndata: {json.dumps({'text': t}, ensure_ascii=False)}\n\n"
-                    for delta in adapter.stream(messages, temperature=temperature, enable_thinking=want_thinking):
-                        clean = _strip_load_refs(delta)
-                        if clean:
-                            assistant_text.append(clean)
-                            yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
-                else:
-                    # 选中 id 全部无效：提示后直接作答，避免循环
-                    messages.append({"role": "user", "content": "你请求的参考资料/设定未能加载（id 无效），请直接作答。"})
-                    if want_thinking and hasattr(adapter, "stream_thinking"):
-                        for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
-                            assistant_thinking.append(t)
-                            yield f"event: thinking\ndata: {json.dumps({'text': t}, ensure_ascii=False)}\n\n"
-                    for delta in adapter.stream(messages, temperature=temperature, enable_thinking=want_thinking):
-                        clean = _strip_load_refs(delta)
-                        if clean:
-                            assistant_text.append(clean)
-                            yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
-            else:
-                if first_text:
-                    # 模型判断无需参考：Pass1 即最终回答，单调用（省一次）
-                    obs["short_circuited"] = True
-                    clean = _strip_load_refs(first_text)
-                    if clean:
-                        assistant_text.append(clean)
-                        yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
-                else:
-                    # chat 不可用：退回单次流式（旧行为）
-                    obs["pass1_failed"] = True
-                    if want_thinking and hasattr(adapter, "stream_thinking"):
-                        for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
-                            assistant_thinking.append(t)
-                            yield f"event: thinking\ndata: {json.dumps({'text': t}, ensure_ascii=False)}\n\n"
-                    for delta in adapter.stream(messages, temperature=temperature, enable_thinking=want_thinking):
-                        clean = _strip_load_refs(delta)
-                        if clean:
-                            assistant_text.append(clean)
-                            yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
+            # ---- 按需参考加载（两阶段）---- 详见 _stream_two_phase 文档
+            obs.update((yield from _stream_two_phase(
+                adapter, messages,
+                want_thinking=want_thinking, temperature=temperature,
+                tag="discussion/chat",
+                assistant_text=assistant_text, assistant_thinking=assistant_thinking,
+            )))
         except Exception as e:  # noqa: BLE001
             yield f"event: chunk\ndata: {json.dumps({'text': f'[模型调用失败：{str(e)[:200]}]'}, ensure_ascii=False)}\n\n"
         finally:
@@ -757,8 +785,6 @@ def global_chat(
         want_thinking = body.enable_thinking if body.enable_thinking is not None else model_cfg["enable_thinking"]
         temperature = body.temperature or model_cfg["temperature"]
 
-        ref_selector = get_reference_selector()
-
         # ---- P0 观测：记录本轮实际加载了哪些设定/参考（不阻塞主流程）----
         obs = {
             "question": last_user_content,
@@ -776,77 +802,14 @@ def global_chat(
             adapter = get_adapter(model_cfg["vendor"], config)
             logger.info(f'[discussion] 模型={model_cfg["model_name"]} ({model_cfg["vendor"]}) | api_base={(model_cfg["api_base"] or "")[:50]} | thinking={want_thinking}')
 
-            first_text = ""
-            if hasattr(adapter, "chat"):
-                try:
-                    first_text = adapter.chat(messages, temperature=temperature, enable_thinking=want_thinking)
-                except Exception as e:
-                    logger.warning(f"[discussion/global-chat] Pass1 失败，降级单次流式: {e}")
-                    first_text = ""
-
-            selected_ids = ref_selector.select(first_text) if first_text else None
-            setting_ids = ref_svc.parse_load_setting(first_text) if first_text else None
-
-            if selected_ids or setting_ids:
-                load_ref_ids = list(dict.fromkeys(selected_ids)) if selected_ids else []
-                load_set_ids = list(dict.fromkeys(setting_ids)) if setting_ids else []
-                obs["load_ref_ids"] = load_ref_ids
-                obs["load_setting_ids"] = load_set_ids
-                ref_blocks = ref_svc.fetch_refs_by_ids(gen_db, load_ref_ids) if load_ref_ids else []
-                set_blocks = ref_svc.fetch_settings_by_ids(gen_db, load_set_ids) if load_set_ids else []
-                if ref_blocks or set_blocks:
-                    obs["ref_loaded"] = bool(ref_blocks)
-                    obs["setting_loaded"] = bool(set_blocks)
-                    loaded_parts = []
-                    for fn, txt in ref_blocks:
-                        loaded_parts.append(f"【参考资料：{fn}】\n{txt}")
-                    for nm, det in set_blocks:
-                        loaded_parts.append(f"【设定库详情：{nm}】\n{det}")
-                    loaded = "\n\n".join(loaded_parts)
-                    messages.append({
-                        "role": "user",
-                        "content": f"已按你的请求加载以下资料/设定详情，请据此作答：\n\n{loaded}",
-                    })
-                    yield f"event: refs\ndata: {json.dumps({'loaded': [fn for fn, _ in ref_blocks] + [nm for nm, _ in set_blocks], 'ids': load_ref_ids + load_set_ids}, ensure_ascii=False)}\n\n"
-                    if want_thinking and hasattr(adapter, "stream_thinking"):
-                        for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
-                            assistant_thinking.append(t)
-                            yield f"event: thinking\ndata: {json.dumps({'text': t}, ensure_ascii=False)}\n\n"
-                    for delta in adapter.stream(messages, temperature=temperature, enable_thinking=want_thinking):
-                        clean = _strip_load_refs(delta)
-                        if clean:
-                            assistant_text.append(clean)
-                            yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
-                else:
-                    messages.append({"role": "user", "content": "你请求的参考资料/设定未能加载（id 无效），请直接作答。"})
-                    if want_thinking and hasattr(adapter, "stream_thinking"):
-                        for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
-                            assistant_thinking.append(t)
-                            yield f"event: thinking\ndata: {json.dumps({'text': t}, ensure_ascii=False)}\n\n"
-                    for delta in adapter.stream(messages, temperature=temperature, enable_thinking=want_thinking):
-                        clean = _strip_load_refs(delta)
-                        if clean:
-                            assistant_text.append(clean)
-                            yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
-            else:
-                if first_text:
-                    obs["short_circuited"] = True
-                    clean = _strip_load_refs(first_text)
-                    if clean:
-                        assistant_text.append(clean)
-                        yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
-                else:
-                    obs["pass1_failed"] = True
-                    if want_thinking and hasattr(adapter, "stream_thinking"):
-                        for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
-                            assistant_thinking.append(t)
-                            yield f"event: thinking\ndata: {json.dumps({'text': t}, ensure_ascii=False)}\n\n"
-                    for delta in adapter.stream(messages, temperature=temperature, enable_thinking=want_thinking):
-                        clean = _strip_load_refs(delta)
-                        if clean:
-                            assistant_text.append(clean)
-                            yield f"event: chunk\ndata: {json.dumps({'text': clean}, ensure_ascii=False)}\n\n"
-        except Exception as e:
+            # ---- 按需参考加载（两阶段）---- 详见 _stream_two_phase 文档
+            obs.update((yield from _stream_two_phase(
+                adapter, messages,
+                want_thinking=want_thinking, temperature=temperature,
+                tag="discussion/global-chat",
+                assistant_text=assistant_text, assistant_thinking=assistant_thinking,
+            )))
+        except Exception as e:  # noqa: BLE001
             yield f"event: chunk\ndata: {json.dumps({'text': f'[模型调用失败：{str(e)[:200]}]'}, ensure_ascii=False)}\n\n"
         finally:
             yield "event: done\ndata: {}\n\n"
