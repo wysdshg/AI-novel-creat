@@ -8,7 +8,9 @@
 1. 在 handler 体内调用 logger（含 `log.exception` / `logger.warning` 等）；
 2. `raise`（把异常交给上层，由上层负责记录）——注意 `raise` 关键字即可，
    `raise X from e` 与裸 `raise` 都算；
-3. 显式以 `# noqa: BLE001` 标注**并列明原因**（极少数确实不该记的情形，需人工评审）。
+3. 显式以 `# noqa: BLE001` 标注**并列明原因**（极少数确实不该记的情形，需人工评审）；
+4. 属于**日志基础设施自身**（`app/core/logging_config.py`）——那里的 except 不能记日志，
+   否则会二次失败/递归（详见该文件的 `_EXEMPT_FILES` 注释）。
 
 本测试即锁定这一状态，防止回潮（新写的 except 一静默就红）。
 """
@@ -20,6 +22,15 @@ APP_DIR = pathlib.Path(__file__).resolve().parents[2] / "app"
 # 允许的"无日志"白名单：文件相对路径 + 行号附近特征不做硬编码，
 # 而是通过"是否有 noqa 注释"来判断——即在 handler 行或体内显式声明豁免。
 _LOGGER_HINTS = ("logger.", "logging.", "log.")
+
+# 整文件豁免：只限**日志基础设施自身**。
+# 理由：`logging_config.py` 的 except 分支**不能调用 logging**——
+#   · handler 还没建好（如 mkdir 失败）时再记日志 → 二次失败；
+#   · 异常 hook 内部再记日志 → 可能递归触发 hook；
+#   · 进程退出阶段记日志 → handler 可能已 shutdown。
+# 这些分支的意图已在源码注释中说明（如"失败返回 None，不能拖垮服务启动"）。
+# 除本文件外，其余模块一律适用静默禁令。
+_EXEMPT_FILES = {"app/core/logging_config.py"}
 
 
 def _handler_has_logging(body_src: str) -> bool:
@@ -36,6 +47,7 @@ def _collect_broad_excepts():
         except SyntaxError:  # pragma: no cover - 语法错误交给别的测试报
             continue
         lines = src.splitlines()
+        rel = str(path.relative_to(APP_DIR.parent)).replace("\\", "/")
         for node in ast.walk(tree):
             if not isinstance(node, ast.ExceptHandler):
                 continue
@@ -50,10 +62,9 @@ def _collect_broad_excepts():
             has_raise = "raise" in body_src
             # 该 except 行本身是否带 noqa 豁免标记
             line_text = lines[node.lineno - 1] if node.lineno - 1 < len(lines) else ""
-            is_exempt = "noqa" in line_text.lower()
+            is_exempt = "noqa" in line_text.lower() or rel in _EXEMPT_FILES
             silent = (not has_log) and (not has_raise) and (not is_exempt)
-            found.append((str(path.relative_to(APP_DIR.parent)).replace("\\", "/"),
-                          node.lineno, silent, body_src.strip().splitlines()[:1]))
+            found.append((rel, node.lineno, silent, body_src.strip().splitlines()[:1]))
     return found
 
 

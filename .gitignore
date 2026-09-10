@@ -23,6 +23,8 @@ backend/tests/reports/
 
 # ---- 日志 ----
 *.log
+# 后端落盘日志目录（含轮转出来的 backend.log.1/2…，*.log 匹配不到带序号的文件）
+backend/logs/
 
 # ---- 临时 / 调试脚本 ----
 _probe.py

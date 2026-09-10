@@ -6,6 +6,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+import logging
+
 from app.core.logging_config import setup_logging
 from app.core.response import ok
 from app.core.database import init_db
@@ -35,6 +37,8 @@ from app.routers import (
 # 统一日志：必须在任何业务模块打日志之前初始化，否则 INFO 级日志会被
 # logging 的「last resort」处理器（仅 WARNING+）静默丢掉。级别可用 NA_LOG_LEVEL 覆盖。
 setup_logging()
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="网页小说智能体 API",
@@ -66,6 +70,13 @@ for r in (
 # 启动时建表并写入示例作品，保证角色库等模块开箱可用
 @app.on_event("startup")
 def _startup():
+    # uvicorn 在 Config.load() 阶段会执行一次 dictConfig，可能把我们原先挂的
+    # 文件 handler 冲掉 —— 这里幂等补挂，确保 uvicorn 自己的日志（含 access）也落盘。
+    from app.core.logging_config import attach_uvicorn_file_logging
+
+    attach_uvicorn_file_logging()
+    logger.info("===== 应用启动完成，开始接收请求 =====")
+
     init_db()
     # 预置 6 条写作 SKILL（幂等：已存在同名则跳过）。
     # 开箱即用比让作者对着空列表发呆强，不满意可以在「写作技能」里改或禁用。
@@ -79,11 +90,12 @@ def _startup():
         try:
             r = seed_skills.install(db)
             if r.get("created"):
-                print(f"[startup] 已安装预置写作 SKILL: {r['created']}")
+                logger.info(f"[startup] 已安装预置写作 SKILL: {r['created']}")
         finally:
             db.close()
     except Exception as e:  # noqa: BLE001
-        print(f"[startup] 预置 SKILL 安装跳过: {type(e).__name__}: {e}")
+        # 原为 print：print 不进日志文件，挂掉后查不到（Phase 3.5 起统一走 logging）
+        logger.warning(f"[startup] 预置 SKILL 安装跳过: {type(e).__name__}: {e}")
 
 
 @app.get("/api/v1/health", tags=["系统"])
