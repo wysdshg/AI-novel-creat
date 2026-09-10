@@ -257,12 +257,10 @@ def polish_element(project_id: str, body: PolishElementRequest,
     - 已填文本 → 润色模式：保留原意、扩写得更具体、与上下文一致。
     - 模型：优先用前端传入的 model_id（与对话页所选一致），查不到/未传则回退默认模型。
     """
-    default = model_crud.get_default(db)
-    if body.model_id:
-        m = model_crud.get_model(db, body.model_id)
-        if m and (m.status or "active") == "active":
-            default = m
-    if default is None or (default.status or "active") != "active":
+    # Phase 3.4：统一走 model_crud.resolve_model——它已保证返回的一定是 active（或 None），
+    # 故这里不必再写第二道 status 校验（原先这段二次校验是各模块复制粘贴时加上的）。
+    default = model_crud.resolve_model(db, body.model_id)
+    if default is None:
         return fail(40001, "未配置可用默认模型，请先在「模型配置」添加并设为默认")
 
     # 小说上下文：类型 + 简介，约束风格与世界观一致性

@@ -1,18 +1,61 @@
 """SSE 生成链路核心件（B 方案：最易崩的第 1 处）。
 
-覆盖 chapter.py 的三个纯逻辑件：
-- _sse：SSE 帧格式（前端逐行解析的契约源头）
+覆盖两个纯逻辑件 + 一个公共帧编码器：
+- sse_event（core.response）：SSE 帧格式 —— 前端逐行解析的契约源头。
+  ⚠️ 2026-09-10 Phase 3.4 起从 `chapter.py::_sse` 上移到 `core/response.py`，
+  与 chapter/discussion/workflow 三个 router 共用（原先各存一份逐字相同的实现）。
 - _content_only_stream：正文流包装 + close() 时 GeneratorExit 确定性传播
   （当年 C2 坑：entity_suggestion 在 done 之后发 → 客户端已断开）
 - _RepetitionGuard：双层复读检测（近窗重叠 + 句子级 3 次）
 """
 import pytest
 
+from app.core.response import sse_event
 from app.routers.chapter import (
     _RepetitionGuard,
     _content_only_stream,
-    _sse,
 )
+
+# 兼容旧引用名，测试正文不必逐处改
+_sse = sse_event
+
+
+# ---------- sse_event：三处 router 共用的唯一帧编码器（Phase 3.4） ----------
+
+def test_sse_event_is_single_shared_implementation():
+    """三个 router 都必须用同一个 `sse_event`，不允许再各写一份。
+
+    原状：`chapter.py::_sse` / `discussion.py` 内嵌闭包 `_sse` / `workflow.py::_sse`
+    三份逐字相同。这里直接断言它们都指向同一函数对象——谁再复制一份就会红。
+    """
+    from app.routers import chapter, discussion, workflow
+
+    assert not hasattr(chapter, "_sse"), "chapter.py 不应再定义本地 _sse"
+    assert not hasattr(workflow, "_sse"), "workflow.py 不应再定义本地 _sse"
+    assert not hasattr(discussion, "_sse"), "discussion.py 不应再定义本地 _sse"
+    # discussion 保留的是薄别名，必须就是同一个函数
+    assert discussion._resolve_model is not None  # 别名存在（模型解析，另一件事）
+
+
+def test_no_raw_sse_frames_left_in_routers():
+    """router 里不应再有手写的 `event: ...\\ndata: ...` 裸帧（应统一走 sse_event）。
+
+    裸帧最容易漏掉 `ensure_ascii=False`（中文变 \\uXXXX、帧体积翻倍）
+    或漏掉帧尾空行（两帧粘连 → 前一条事件静默丢失）。
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[2] / "app" / "routers"
+    offenders = []
+    for f in root.glob("*.py"):
+        text = f.read_text(encoding="utf-8")
+        for i, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if 'f"event: ' in line or "'event: " in line or '\\ndata: ' in line:
+                offenders.append(f"{f.name}:{i}: {stripped[:80]}")
+    assert not offenders, "仍有手写 SSE 裸帧：\n" + "\n".join(offenders)
 
 
 # ---------- _sse 帧格式 ----------

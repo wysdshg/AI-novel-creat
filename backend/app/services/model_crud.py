@@ -141,6 +141,37 @@ def get_default(db: Session) -> ModelConfigORM | None:
     )
 
 
+def resolve_model(db: Session, model_id: str | None = None) -> ModelConfigORM | None:
+    """**取本轮要用的模型**：优先前端显式指定的 `model_id`，否则回退默认模型。
+
+    返回 ModelConfigORM | None（None 表示无可用模型，调用方自行决定报错还是兜底）。
+
+    ⚠️ 抽本函数前，这段「指定优先、否则默认」的逻辑在 `discussion.py` / `assist.py` /
+    `chapter.py` 里**各写了一份**，且细节已经**漂移出真 bug**：
+
+    - `chapter.py` 直接用 `db.query(ModelConfigORM).filter_by(id=...)` 取指定模型，
+      **绕过了 active 状态校验**——前端若提交一个已停用（或已被删但缓存）的 model_id，
+      就会拿它去真实调用并失败（其余两处都会回退默认）。
+    - 三处对「什么算可用」的判定也不一致（有的只查 `status`，有的不查）。
+
+    统一走本函数后：`model_id` 存在**且 `status == active`** 才采用，否则一律回退默认，
+    语义只有一处、不再各自漂移。
+
+    改造前 `chapter.py` 的 `use_model = default is not None and (default.status or "active") == "active"`、
+    `assist.py` 的 `if default is None or (default.status or "active") != "active"` 这类
+    调用方二次校验**不需要再写**——本函数已保证返回的一定是 active（或 None）。
+    """
+    if model_id:
+        m = get_model(db, model_id)
+        if m and (m.status or "active") == "active":
+            return m
+    d = get_default(db)
+    # 默认模型也需过一遍 active 校验（历史数据可能停在 disabled）
+    if d and (d.status or "active") != "active":
+        return None
+    return d
+
+
 def test_connection(req: ModelTestRequest) -> dict:
     """真实连通性测试。调用前由路由层把 model_id 解析为各连接字段填入 req。"""
     config = {

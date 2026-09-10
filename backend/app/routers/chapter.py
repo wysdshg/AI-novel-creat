@@ -9,7 +9,6 @@ SSE 事件序列：
   → saved（章节已落库）→ ingest（记忆抽取 + 走向建议）→ done
 """
 import logging
-import json
 import os
 import re
 import threading
@@ -19,7 +18,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.schemas.chapter import GenerateRequest, ChapterCreate, ChapterUpdate
-from app.core.response import ok
+from app.core.response import ok, sse_event
 from app.core.database import get_session
 from app.core import database as _db
 from app.core.context import build_chapter_messages
@@ -28,7 +27,7 @@ from app.services import (
     reference_crud,
 )
 from app.core.gateway.registry import get_adapter
-from app.models.orm import ReferenceDocORM, ChapterORM, ModelConfigORM
+from app.models.orm import ReferenceDocORM, ChapterORM
 
 router = APIRouter(tags=["章节生成"])
 
@@ -203,10 +202,6 @@ def _similarity(a: str, b: str) -> float:
         return 0.0
     sa, sb = set(a), set(b)
     return len(sa & sb) / len(sa | sb)
-
-
-def _sse(event: str, payload: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def _can_persist(full: str, error_notes: list[str] | None = None) -> tuple[bool, str]:
@@ -419,12 +414,13 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
         ]
         ctx_meta = {"error": str(e)[:200]}
 
-    # 模型选择：优先用前端指定的 model_id（与对话流保持一致），否则 fallback 到默认模型
-    if body.model_id:
-        default = db.query(ModelConfigORM).filter_by(id=body.model_id).first()
-    else:
-        default = model_crud.get_default(db)
-    use_model = default is not None and (default.status or "active") == "active"
+    # 模型选择：统一走 model_crud.resolve_model（Phase 3.4）。
+    # ⚠️ 原先这里是 `db.query(ModelConfigORM).filter_by(id=body.model_id).first()`——**绕过了
+    # active 校验**，前端若提交一个已停用的 model_id 就会拿它去真实调用并失败；
+    # 现在与商讨/辅助共用同一语义（指定且 active 才用，否则回退默认）。
+    default = model_crud.resolve_model(db, body.model_id)
+    # resolve_model 已保证返回的一定是 active，故 use_model 等价于「有没有取到模型」。
+    use_model = default is not None
 
     # ---- 硬伤修复：章节生成长文任务，输出上限按目标字数换算，覆盖模型配置的 max_tokens ----
     # 本地 qwen3.5:4b 配置 max_tokens=2048 → num_predict=2048，单章最多约 2600~3000 字就被硬截断，
@@ -456,10 +452,10 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
         messages, ctx_meta = _maybe_load_refs(db, project_id, messages, ctx_meta, default, body)
 
     def event_stream():
-        yield _sse("start", {"chapter_no": chapter_no})
-        yield _sse("context", ctx_meta)
+        yield sse_event("start", {"chapter_no": chapter_no})
+        yield sse_event("context", ctx_meta)
         if ctx_meta.get("refs_loaded_extra"):
-            yield _sse("refs", {"loaded": ctx_meta["refs_loaded_extra"]})
+            yield sse_event("refs", {"loaded": ctx_meta["refs_loaded_extra"]})
         content_parts = []
         # 错误/占位提示只用于**推给前端展示**，绝不进入 content_parts——
         # 否则会被拼进正文落库，错误文案变成小说内容（问题 1.2，2026-09-10 复核仍是活 bug）。
@@ -566,7 +562,7 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
                     for _, delta in gen:
                         if guard.feed(delta):
                             content_parts.append(delta)
-                            yield _sse("chunk", {"text": delta})
+                            yield sse_event("chunk", {"text": delta})
                         else:
                             # 检测到重复循环：立即中断，不再消费迭代器。
                             # 旧实现「continue 消费剩余 chunk」会让模型继续生成、云端继续计费
@@ -585,15 +581,15 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
             except Exception as e:  # noqa: BLE001
                 _note = f"[模型调用失败，已降级为占位：{str(e)[:200]}]"
                 error_notes.append(_note)
-                yield _sse("chunk", {"text": "\n" + _note})  # 仅展示，不落库
+                yield sse_event("chunk", {"text": "\n" + _note})  # 仅展示，不落库
         else:
             _placeholder = "[章节正文占位 — 未配置可用模型，请在「模型配置」中添加并设为默认]"
             error_notes.append(_placeholder)
-            yield f"event: chunk\ndata: {json.dumps({'text': _placeholder}, ensure_ascii=False)}\n\n"
+            yield sse_event("chunk", {"text": _placeholder})
 
         if loop_stopped:
             # 复读检测截断：给前端明确信号（否则看起来像"卡住"）
-            yield _sse("stopped", {"reason": "detected_repetition", "chars": len("".join(content_parts))})
+            yield sse_event("stopped", {"reason": "detected_repetition", "chars": len("".join(content_parts))})
 
         full = "".join(content_parts)
 
@@ -609,18 +605,18 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
         if scan_enabled and use_model and full.strip():
             try:
                 report = humanizer.scan(full, scene="novel")
-                yield _sse("validate", report)
+                yield sse_event("validate", report)
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[generate_chapter] AI 味检测失败: {e}")
-                yield _sse("validate", {"issues": []})
+                yield sse_event("validate", {"issues": []})
         else:
-            yield _sse("validate", {"issues": []})
+            yield sse_event("validate", {"issues": []})
 
         # 未配置模型时的占位文本：不得覆盖已有章节正文（否则静默丢数据）。
         # 重新生成场景直接跳过落库，提示用户先配置模型。
         if not use_model and body.chapter_id:
-            yield _sse("chunk", {"text": "\n\n[未配置可用模型，已保留原章节正文。请在「模型配置」中添加并设为默认后重试]"})
-            yield _sse("done", {"chapter_id": body.chapter_id, "word_count": 0})
+            yield sse_event("chunk", {"text": "\n\n[未配置可用模型，已保留原章节正文。请在「模型配置」中添加并设为默认后重试]"})
+            yield sse_event("done", {"chapter_id": body.chapter_id, "word_count": 0})
             return
 
         # ⚠️ 正文为空 → 绝不落库（问题 1.2）。
@@ -629,8 +625,8 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
         # 已有正文**（数据丢失）。此时只发 error 事件说明原因，不发 saved。
         can_save, block_reason = _can_persist(full, error_notes)
         if not can_save:
-            yield _sse("error", {"message": block_reason})
-            yield _sse("done", {"chapter_id": body.chapter_id, "word_count": 0, "saved": False})
+            yield sse_event("error", {"message": block_reason})
+            yield sse_event("done", {"chapter_id": body.chapter_id, "word_count": 0, "saved": False})
             return
 
         # 落库（4 级结构下 article_id 从 body 透传）
@@ -667,7 +663,7 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
                     article_id=body.article_id,
                 ),
             )
-        yield _sse("saved", {"chapter_id": chapter.id, "word_count": chapter.word_count})
+        yield sse_event("saved", {"chapter_id": chapter.id, "word_count": chapter.word_count})
 
         # 写后摄取：挪到后台线程（独立 DB 会话），不阻塞 SSE。
         # done 立即发出——正文已落库、前端马上显示完成；摄取结果（记忆/摘要/走向）
@@ -688,11 +684,11 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
                     args=(project_id, chapter.id, chapter.id, None, body.ingest_level),
                     daemon=True,
                 ).start()
-                yield _sse("ingest_start", {"chapter_id": chapter.id, "async": True})
+                yield sse_event("ingest_start", {"chapter_id": chapter.id, "async": True})
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[generate_chapter] 启动后台摄取失败: {e}")
 
-        yield _sse("done", {"chapter_id": chapter.id, "word_count": chapter.word_count})
+        yield sse_event("done", {"chapter_id": chapter.id, "word_count": chapter.word_count})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

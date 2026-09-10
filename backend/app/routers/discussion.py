@@ -7,7 +7,6 @@
 - POST   /discussion/chat       流式调用默认模型，结束后再把「用户提问 + AI 回复」落库
 """
 import logging
-import json
 import re
 from typing import Optional
 
@@ -16,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.schemas.chapter import DiscussionMessageCreate, DiscussionChatRequest
-from app.core.response import ok
+from app.core.response import ok, sse_event
 from app.core.database import get_session
 import app.core.database as _db
 from app.core.context import build_discussion_system, layers
@@ -37,17 +36,10 @@ from app.services import load_observation as load_obs
 
 logger = logging.getLogger(__name__)
 
-
-def _resolve_model(db: Session, model_id: Optional[str] = None):
-    """根据前端指定的 model_id 查模型配置；不传或查不到则 fallback 到默认模型。
-
-    返回 ModelORM | None（None 表示无可用模型）。
-    """
-    if model_id:
-        m = model_crud.get_model(db, model_id)
-        if m and (m.status or "active") == "active":
-            return m
-    return model_crud.get_default(db)
+# 模型解析统一在 model_crud.resolve_model（Phase 3.4）——原先本模块、assist.py、
+# chapter.py 各写一份「指定优先、否则默认」，且 chapter.py 那份漏了 active 校验。
+# 这里保留 `_resolve_model` 这个薄别名，避免改动 20+ 处调用点、也便于阅读。
+_resolve_model = model_crud.resolve_model
 
 
 router = APIRouter(tags=["剧情商讨"])
@@ -264,15 +256,12 @@ def _stream_two_phase(adapter, messages, *, want_thinking, temperature, tag,
     - 抽出本函数前，这段逻辑在 `chat` 与 `global_chat` 里**各存在一份**（约 80 行），
       唯一差异是日志前缀。任一处修 bug 漏改另一处就是潜在缺陷，故合并。
     """
-    def _sse(event: str, payload: dict) -> str:
-        return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
     def _emit_thinking():
         """按用户偏好流式产出思考内容（适配器不支持则跳过）。"""
         if want_thinking and hasattr(adapter, "stream_thinking"):
             for t in adapter.stream_thinking(messages, temperature=temperature, enable_thinking=want_thinking):
                 assistant_thinking.append(t)
-                yield _sse("thinking", {"text": t})
+                yield sse_event("thinking", {"text": t})
 
     def _emit_text():
         """流式产出正文；`_strip_load_refs` 拦掉模型偶发漏出的 LOAD_REFS 指令行。"""
@@ -280,7 +269,7 @@ def _stream_two_phase(adapter, messages, *, want_thinking, temperature, tag,
             clean = _strip_load_refs(delta)
             if clean:
                 assistant_text.append(clean)
-                yield _sse("chunk", {"text": clean})
+                yield sse_event("chunk", {"text": clean})
 
     # ---- Pass1：非流式，探询是否需要加载参考 ----
     first_text = ""
@@ -316,7 +305,7 @@ def _stream_two_phase(adapter, messages, *, want_thinking, temperature, tag,
                 "role": "user",
                 "content": f"已按你的请求加载以下资料/设定详情，请据此作答：\n\n" + "\n\n".join(loaded_parts),
             })
-            yield _sse("refs", {
+            yield sse_event("refs", {
                 "loaded": [fn for fn, _ in ref_blocks] + [nm for nm, _ in set_blocks],
                 "ids": load_ref_ids + load_set_ids,
             })
@@ -335,7 +324,7 @@ def _stream_two_phase(adapter, messages, *, want_thinking, temperature, tag,
         clean = _strip_load_refs(first_text)
         if clean:
             assistant_text.append(clean)
-            yield _sse("chunk", {"text": clean})
+            yield sse_event("chunk", {"text": clean})
         return {"short_circuited": True}
 
     # adapter 无 chat（Pass1 不可用）：退回单次流式（旧行为）
@@ -419,7 +408,8 @@ def chat(
     否则归属小说级默认线程。
     """
     default = _resolve_model(db, body.model_id)
-    use_model = default is not None and (default.status or "active") == "active"
+    # _resolve_model 已保证返回的一定是 active（或 None），故 use_model 等价于「取到模型没」
+    use_model = default is not None
 
     # 在请求级 session 仍打开时，把 ModelConfigORM 的标量字段提取为普通 dict。
     # 流式生成器在线程池运行，届时请求 session 已关闭，直接访问 default.* 会触发
@@ -466,8 +456,8 @@ def chat(
 
     def event_stream():
         if not use_model:
-            yield f"event: chunk\ndata: {json.dumps({'text': '[未配置可用模型，请在「模型配置」中添加并设为默认]'}, ensure_ascii=False)}\n\n"
-            yield "event: done\ndata: {}\n\n"
+            yield sse_event("chunk", {"text": "[未配置可用模型，请在「模型配置」中添加并设为默认]"})
+            yield sse_event("done", {})
             return
 
         # 流式生成器在线程池运行，请求级 session 已关闭。自建独立 session 供内部所有
@@ -497,7 +487,7 @@ def chat(
             sys_prompt, ctx_meta = build_discussion_system(
                 gen_db, project_id, chapter_id=chapter_id, query_text=_latest_user
             )
-            yield f"event: context\ndata: {json.dumps(ctx_meta, ensure_ascii=False)}\n\n"
+            yield sse_event("context", ctx_meta)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[discussion/chat] 上下文组装失败，降级: {e}")
             sys_prompt = _SYS_PROMPT + _collect_skill_blocks(gen_db)
@@ -564,9 +554,9 @@ def chat(
                 assistant_text=assistant_text, assistant_thinking=assistant_thinking,
             )))
         except Exception as e:  # noqa: BLE001
-            yield f"event: chunk\ndata: {json.dumps({'text': f'[模型调用失败：{str(e)[:200]}]'}, ensure_ascii=False)}\n\n"
+            yield sse_event("chunk", {"text": f"[模型调用失败：{str(e)[:200]}]"})
         finally:
-            yield "event: done\ndata: {}\n\n"
+            yield sse_event("done", {})
             # 持久化 AI 回复（用户消息已在流开始前落库）
             try:
                 full = "".join(assistant_text)
@@ -592,7 +582,7 @@ def chat(
                     model_id=model_cfg["id"] if model_cfg else None,
                 )
                 if suggestion:
-                    yield "event: entity_suggestion\ndata: " + json.dumps(suggestion, ensure_ascii=False) + "\n\n"
+                    yield sse_event("entity_suggestion", suggestion)
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[discussion/chat] 实体建议抽取失败: {e}")
             # P0 观测落库（记录本轮设定/参考加载情况，失败静默）
@@ -681,7 +671,8 @@ def global_chat(
     消息持久化到 project_id="__global__" 的默认线程，刷新/重进后仍保留记忆。
     """
     default = _resolve_model(db, body.model_id)
-    use_model = default is not None and (default.status or "active") == "active"
+    # _resolve_model 已保证返回的一定是 active（或 None），故 use_model 等价于「取到模型没」
+    use_model = default is not None
 
     # 在请求级 session 仍打开时，把 ModelConfigORM 的标量字段提取为普通 dict，
     # 避免流式生成器（线程池运行）访问已关闭 session 触发 DetachedInstanceError。
@@ -717,8 +708,8 @@ def global_chat(
 
     def event_stream():
         if not use_model:
-            yield f"event: chunk\ndata: {json.dumps({'text': '[未配置可用模型，请在「模型配置」中添加并设为默认]'}, ensure_ascii=False)}\n\n"
-            yield "event: done\ndata: {}\n\n"
+            yield sse_event("chunk", {"text": "[未配置可用模型，请在「模型配置」中添加并设为默认]"})
+            yield sse_event("done", {})
             return
 
         # 流式生成器在线程池运行，请求级 session 已关闭。自建独立 session 供内部所有
@@ -739,7 +730,7 @@ def global_chat(
         try:
             sys_prompt = _build_global_system(gen_db)
             ctx_meta = {"mode": "global", "global_chat": True}
-            yield f"event: context\ndata: {json.dumps(ctx_meta, ensure_ascii=False)}\n\n"
+            yield sse_event("context", ctx_meta)
         except Exception as e:
             logger.warning(f"[discussion/global-chat] 上下文组装失败，降级: {e}")
             sys_prompt = _SYS_PROMPT + _collect_skill_blocks(db)
@@ -810,9 +801,9 @@ def global_chat(
                 assistant_text=assistant_text, assistant_thinking=assistant_thinking,
             )))
         except Exception as e:  # noqa: BLE001
-            yield f"event: chunk\ndata: {json.dumps({'text': f'[模型调用失败：{str(e)[:200]}]'}, ensure_ascii=False)}\n\n"
+            yield sse_event("chunk", {"text": f"[模型调用失败：{str(e)[:200]}]"})
         finally:
-            yield "event: done\ndata: {}\n\n"
+            yield sse_event("done", {})
             # 持久化 AI 回复到全局线程（用户消息已在流开始前落库）。
             try:
                 full = "".join(assistant_text)

@@ -5,7 +5,6 @@
 - 运行：POST /workflows/{wf_id}/runs（SSE 流式），历史 GET /{wf_id}/runs，详情 GET /runs/{run_id}
 - 节点目录：GET /workflows/meta/node-types（前端节点面板渲染用）
 """
-import json
 import queue
 import threading
 from typing import Optional
@@ -15,16 +14,12 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_session
-from app.core.response import ok
+from app.core.response import ok, sse_event
 from app.models.orm import WorkflowNodeRunORM, WorkflowRunORM
 from app.schemas.workflow import WorkflowCreate, WorkflowUpdate, WorkflowRunRequest
 from app.services import workflow_crud as svc
 
 router = APIRouter(prefix="/workflows", tags=["工作流（全局）"])
-
-
-def _sse(event: str, payload: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 @router.get("/meta/node-types", summary="节点类型目录（前端节点面板用）")
@@ -123,15 +118,15 @@ def run_workflow(wf_id: str, body: WorkflowRunRequest, db: Session = Depends(get
             kind, evt, payload = q.get()
             if kind == "done":
                 break
-            yield _sse(evt, payload)
+            yield sse_event(evt, payload)
         if holder.get("error"):
-            yield _sse("error", {"message": str(holder["error"])})
-            yield _sse("run_end", {"run_id": wf_id, "status": "failed",
+            yield sse_event("error", {"message": str(holder["error"])})
+            yield sse_event("run_end", {"run_id": wf_id, "status": "failed",
                                    "error": str(holder["error"])[:500]})
         else:
             res = holder.get("result") or {}
             run = res.get("run") or {}
-            yield _sse("run_end", {
+            yield sse_event("run_end", {
                 "run_id": run.get("id", wf_id),
                 "status": run.get("status", "success"),
                 "outputs": run.get("outputs", {}),

@@ -6,6 +6,16 @@
 ---
 
 ## 2026-09-10
+- **Phase 3.4 统一 SSE 帧编码 + 模型解析（消 3 份 + 15 处重复，修 1 个真 bug）**：
+  - **① SSE 帧编码 → `backend/app/core/response.py::sse_event(event, payload)`**：`chapter.py` / `discussion.py` / `workflow.py` **各写一份逐字相同的 `_sse()`**，另有 **15 处手拼裸帧**（`f"event: chunk\ndata: {json.dumps(...)}\n\n"`、`yield "event: done\ndata: {}\n\n"` 之类），全部收敛到单一实现。函数内部保证两条契约：
+    - **`ensure_ascii=False` 不能漏** —— 否则中文正文全变 `\uXXXX` 转义（体积翻倍、前端还要再解一轮）；
+    - **帧尾必须是空行 `\n\n`** —— 前端按 `split('\n\n')` 切帧，缺空行会把相邻两帧**粘成一帧**（表现为"事件丢了/乱码"）。
+    - **新增护栏测试** `test_sse_stream.py::test_no_raw_sse_frames_left_in_routers`：扫 `app/routers/*.py` 禁止再出现裸帧字面量。**首次运行即失败**，抓出 4 处人工搜索漏掉的 `yield "event: done\ndata: {}\n\n"`（`discussion.py` 三个 `done` 分支）—— 这正是自动化护栏相对于"我搜过了"的价值。
+  - **② 模型解析 → `backend/app/services/model_crud.py::resolve_model(db, model_id)`**：原先 `chapter.py` / `discussion.py::_resolve_model` / `assist.py` / `config_command.py` **四份各自实现、细节已漂移**。统一语义：**显式 `model_id` 且 `status=='active'` 才用它，否则回退默认模型；默认模型本身非 active 或库里无可用模型 → 返回 `None`**（调用方须 `fail(...)` 提示用户去「模型配置」添加并设为默认）。
+    - **修出一个真 bug**：`chapter.py` 原先写 `db.query(ModelConfigORM).filter_by(id=body.model_id).first()`，**完全绕过 active 校验** —— 已被停用/删除的模型只要 id 还在库里就照样被拿去发请求（轻则 401/404，重则打错模型）。`discussion.py` 两处 `use_model = default is not None and (default.status or "active") == "active"` 又与 `assist.py` 不一致。现 4 处行为完全一致。
+  - **新增 `backend/tests/unit/test_model_resolve.py` 14 例**：显式 active 优先 / **显式 inactive 回退默认（核心回归）** / 未知 id 回退 / 无 id 取默认 / 无默认回退首个 active primary / 默认 inactive 返回 `None` / 空库返回 `None`；外加一个用 `ast` 解析源码（**剥掉 docstring 与注释**，避免匹配到解释性文字）的**调用方护栏测试**，禁止任何模块再手搓模型解析。
+  - **踩坑**：`ModelConfigORM` 字段名是 **`vendor` 不是 `provider`**；且 `vendor` / `role` 都是 Pydantic `Literal` 约束 —— `"openai_compat"`（那是适配器名）与 `"secondary"`（非法角色）都会直接抛校验错，测试里改用 `"custom"` / `"parse"`。
+  - **验证**：全量 **158 单测 passed**（144 + 14；`test_sse_stream.py` 因 `_sse` 迁移改了 import 并 +2 例）；后端可加载、**139 路由**不变（139 = 134 条 `/api/v1` 业务路由 + 5 条框架路由）；真机 8010（**用户 8000 全程未动**）**10/10 通过** —— workflow 与 discussion 两类 SSE 流逐帧断言 `ensure_ascii=False` 生效（中文未被转义）与 `\n\n` 切帧正常，**并确认终帧 workflow = `run_end` / discussion = `done`**（顺带修正 05 文档把 workflow 终帧误写成 `done` 的错误）。验证用的临时工作流 3 个、临时作品 1 个已删净，用户真实数据未动。
 - **Phase 3.3 抽公共 SSE 工具 + SVG 视口 composable（消 4 份 + 2 份重复，顺带修 2 个真 bug）**：
   - **`frontend/src/utils/sse.js`（新）**：抽出 `createSseParser`（纯解析器，可单测）/ `readSseStream`（**HTTP 状态校验 → 读流 → 超时/外部中止 + `GenerationStopped` 语义**）/ `createTimeoutController` / `postSseStream`（一站式 POST+读流）。改造前 `chapter.js` / `discussion.js`（2 处）/ `workflow.js` **各自手写**「`getReader` + `TextDecoder` + `split('\n\n')` + 正则抠 `event:`/`data:`」，差异只在错误容忍度与超时处理——**正是这种"看着差不多"的复制最容易修 bug 时漏改其中一处**。净减 **175 行 → 36 行**。
     - 差异参数化：`errorPrefix`（各接口 400/500 文案，如「章节生成接口」——用户直接看到这句话）、`stoppedMessage`（默认「已停止生成」）、`tolerant`（`false` 供本地工作流：畸形 SSE 直接抛、错误尽早暴露；默认 `true` 供长对话流：单条畸形数据跳过、不杀死整条流）。`SSE_TIMEOUT_MS = 180000` 与 axios timeout 对齐。

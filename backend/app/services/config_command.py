@@ -133,12 +133,10 @@ def _sanitize_characters(data: dict) -> None:
 
 def run(db: Session, project_id: str, text: str, dry_run: bool = False,
         model_id: str | None = None, entity_type: str | None = None):
-    # 优先用调用方指定的模型（如本地 Ollama）；否则回退默认模型
-    if model_id:
-        default = model_crud.get_model(db, model_id)
-    else:
-        default = model_crud.get_default(db)
-    use_model = default is not None and (default.status or "active") == "active"
+    # 模型选择统一走 model_crud.resolve_model（Phase 3.4）：指定且 active 才用，否则回退默认。
+    # 原先此处自写了一遍「get_model / get_default + 二次 status 校验」，与 router 层重复。
+    default = model_crud.resolve_model(db, model_id)
+    use_model = default is not None
     if not use_model:
         return ok({
             "reply": "未配置可用的默认模型。请先在左侧「模型配置」中添加模型并设为默认，才能自动整理资料库。",

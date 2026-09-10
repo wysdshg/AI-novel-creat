@@ -426,11 +426,16 @@ def _concat_summary(child_summaries, cap: int = 500) -> str | None:
 
 
 def _resolve_agg_model(db: Session, model_id: str | None = None):
-    """聚合用模型：优先用调用方指定的 model_id（与对话页所选一致），否则 memory 角色 / 默认模型。"""
-    if model_id:
-        m = model_crud.get_model(db, model_id)
-        if m and (m.status or "active") == "active":
-            return m
+    """聚合用模型：优先用调用方指定的 model_id（与对话页所选一致），否则 memory 角色 / 默认模型。
+
+    Phase 3.4：本文件原先自写了一份「指定 model_id → active 校验 → 回退」，与
+    `model_crud.resolve_model` 语义相同；现直接复用后者，只保留「再退到 memory 角色」这一
+    本函数独有的差异（聚合任务优先挑 memory 角色模型更省成本）。
+    """
+    m = model_crud.resolve_model(db, model_id)
+    if m is not None:
+        return m
+    # resolve_model 只覆盖「默认模型」；聚合场景额外允许挑 memory 角色模型兜底。
     return _pick_model(db)
 
 
