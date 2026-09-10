@@ -3,13 +3,17 @@
 完整 CRUD：create / list（按 project or article）/ get / update / delete。
 所有变更同步更新 ProjectORM.chapter_count（按需）。
 """
+import logging
 import uuid
 
 from sqlalchemy.orm import Session
 
 from app.models.orm import ChapterMemoryORM, ChapterORM, ProjectORM
 from app.schemas.chapter import ChapterCreate, ChapterUpdate
+from app.services import eval_crud
 from app.services.discussion_crud import clear_messages
+
+logger = logging.getLogger(__name__)
 
 
 def _now():
@@ -75,6 +79,9 @@ def delete_chapter(db: Session, project_id: str, chapter_id: str) -> bool:
     # 而记忆会被后续章节的上下文注入读到 → 删了章却还能"回忆"到它。
     db.query(ChapterMemoryORM).filter_by(project_id=project_id, chapter_id=chapter_id).delete(
         synchronize_session=False)
+    # 级联清理该章的「生成版本与评分」（Phase 4.1 最小 eval）：版本自带正文快照，
+    # 不清理会留下孤儿并污染"版本对比"列表。commit=False → 与删章同一事务提交。
+    eval_crud.delete_by_chapter(db, chapter_id, commit=False)
     db.delete(o)
     proj = db.query(ProjectORM).filter_by(id=project_id).first()
     if proj and (proj.chapter_count or 0) > 0:

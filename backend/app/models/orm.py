@@ -474,3 +474,45 @@ class VectorChunkORM(Base):
     dim: Mapped[int] = mapped_column(Integer, default=0)
     embedding_json: Mapped[str] = mapped_column(Text, default="")     # float 数组 JSON（1024 维约 20KB）
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ChapterVariantORM(Base):
+    """章节生成版本快照（Phase 4.1 最小 eval，2026-09-10）。
+
+    每次生成/重新生成章节时自动留档一条，记录**当时的配置快照 + 正文 + 自动指标**，
+    供人工打 1~5 分、同章多版本横向对比 —— 回答「改了配置之后，是变好还是变坏」。
+
+    设计取舍：
+    - 正文**整存**，不引用 `chapters.content`：重新生成会覆盖原章，历史版本就没了；
+      而评估的前提恰恰是"能看见旧版本"。代价是空间（单章 2~3KB），可接受。
+    - `config_snapshot` / `metrics` 用 JSON：指标会持续增加，不值得每加一个就改表加列。
+    """
+    __tablename__ = "chapter_variants"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    chapter_id: Mapped[str] = mapped_column(String(36), index=True)   # 归属章（重新生成时不变）
+    article_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    title: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    content: Mapped[str] = mapped_column(Text, default="")            # 该版本正文快照
+    word_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 生成时的配置快照：vendor / model_name / temperature / max_tokens / ref_mode / 各开关
+    config_snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 机器侧自动指标：duration_ms / first_token_ms / humanize_score / 上下文统计 等
+    metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class EvalRecordORM(Base):
+    """人工评分记录（Phase 4.1 最小 eval，2026-09-10）。
+
+    与 `ChapterVariantORM` 一对多：同一版本可重复评分（保留"什么时候改的分"、
+    便于回看自己的标准有没有漂移）。取"当前分数"= 该 variant 下 created_at 最新的一条。
+    """
+    __tablename__ = "eval_records"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    variant_id: Mapped[str] = mapped_column(String(36), index=True)
+    score: Mapped[int] = mapped_column(Integer)                       # 1~5 总分
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 预留：将来要多维度（文笔/一致性/设定符合度）时写这里，**无需改表**
+    dimensions: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

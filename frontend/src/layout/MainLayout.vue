@@ -184,7 +184,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Plus, Files, Delete, Setting, Document, Notebook, Collection,
-  ChatLineRound,
+  ChatLineRound, DataAnalysis,
 } from '@element-plus/icons-vue'
 import { useProjectStore } from '@/store/project'
 import { volumeApi } from '@/api/volume'
@@ -207,6 +207,9 @@ const globalEntries = [
   { label: '参考资料', icon: Document, name: 'global-reference' },
   { label: '设定库',   icon: Collection, name: 'setting' },
   { label: 'SKILL',    icon: Notebook, name: 'custom-skill' },
+  // Phase 4.1：生成评估（版本留档 / 打分 / 对比）—— 必须有侧栏入口，
+  // 否则路由存在但用户点不到（本项目已两次踩过「零入口」的坑，见 06 手册）
+  { label: '生成评估', icon: DataAnalysis, name: 'eval' },
 ]
 function goEntry(entry) {
   router.push({ name: entry.name })

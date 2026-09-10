@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import threading
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -23,8 +24,8 @@ from app.core.database import get_session
 from app.core import database as _db
 from app.core.context import build_chapter_messages
 from app.services import (
-    app_config, article_crud, chapter_crud, humanizer, ingestion, model_crud,
-    reference_crud,
+    app_config, article_crud, chapter_crud, eval_crud, humanizer, ingestion,
+    model_crud, reference_crud,
 )
 from app.core.gateway.registry import get_adapter
 from app.models.orm import ReferenceDocORM, ChapterORM
@@ -457,6 +458,10 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
         messages, ctx_meta = _maybe_load_refs(db, project_id, messages, ctx_meta, default, body)
 
     def event_stream():
+        _t0 = time.time()   # Phase 4.1：为版本留档计总耗时
+        # 这两个变量只在 use_model 分支内被赋值；先置 None，保证留档时能安全取用
+        report = None
+        _temp = None
         yield sse_event("start", {"chapter_no": chapter_no})
         yield sse_event("context", ctx_meta)
         if ctx_meta.get("refs_loaded_extra"):
@@ -673,6 +678,45 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
                 ),
             )
         yield sse_event("saved", {"chapter_id": chapter.id, "word_count": chapter.word_count})
+
+        # ── Phase 4.1 最小 eval：把本次生成留档为一个「版本」 ──
+        # 目的：让「改了配置之后是变好还是变坏」可被回答 ——
+        # 留档 = 配置快照 + 正文 + 自动指标，事后人工打 1~5 分，同章多版本横向对比。
+        # **旁路设计**：整段包在 try 里，任何异常都只少一条记录，绝不影响生成主链路。
+        try:
+            eval_crud.record_variant(
+                db, project_id, chapter.id,
+                article_id=chapter.article_id,
+                title=chapter.title,
+                content=full,
+                config_snapshot={
+                    "vendor": getattr(default, "vendor", None),
+                    "model_name": getattr(default, "model_name", None),
+                    "temperature": _temp,
+                    "max_tokens": chapter_max_tokens if use_model else None,
+                    "ref_mode": ref_mode,
+                    "humanize_scan": scan_enabled,
+                    "ingest_level": body.ingest_level or "full",
+                    "word_range": body.word_range,
+                    "enable_thinking": body.enable_thinking,
+                },
+                metrics={
+                    "duration_ms": int((time.time() - _t0) * 1000),
+                    "word_count": len(full),
+                    "humanize_score": (report or {}).get("score"),
+                    "humanize_issues": len(((report or {}).get("issues")) or []),
+                    "loop_stopped": loop_stopped,
+                    "error_notes": list(error_notes),
+                    # 上下文只留可读摘要（ctx_meta 全量可能很大，且键名会随实现变动）
+                    "ctx": {
+                        "ref_mode": ctx_meta.get("ref_mode"),
+                        "refs_extra": ctx_meta.get("refs_loaded_extra"),
+                        "keys": sorted(str(k) for k in ctx_meta.keys()),
+                    },
+                },
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[generate_chapter] 版本留档失败（不影响生成）: {type(e).__name__}: {e}")
 
         # 写后摄取：挪到后台线程（独立 DB 会话），不阻塞 SSE。
         # done 立即发出——正文已落库、前端马上显示完成；摄取结果（记忆/摘要/走向）
