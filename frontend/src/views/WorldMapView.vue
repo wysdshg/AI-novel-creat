@@ -42,7 +42,7 @@
             :class="{ grabbing: isDragging }"
             :viewBox="viewBoxStr"
             preserveAspectRatio="xMidYMid meet"
-            @mousedown="onMouseDown"
+            @mousedown="onMouseDownPan"
             @mousemove="onMouseMove"
             @mouseup="onMouseUp"
             @mouseleave="onMouseUp"
@@ -66,7 +66,7 @@
             <text :x="vb.x + 16" :y="vb.y + vb.h - 16" class="wm-plane-watermark">{{ activePlane }}</text>
 
             <!-- 地图内容：可平移/缩放 -->
-            <g :transform="`matrix(${view.scale},0,0,${view.scale},${view.tx},${view.ty})`">
+            <g class="wm-content" :transform="contentTransform">
               <!-- 背景网格：覆盖整个 viewBox，随缩放平移 -->
               <g class="wm-grid">
                 <line
@@ -140,7 +140,7 @@
               <el-button :icon="ZoomOut" title="缩小" @click="zoomBy(1 / 1.2)" />
               <el-button :icon="RefreshRight" title="重置视图" @click="resetView" />
             </el-button-group>
-            <div class="wm-zoom-info">{{ Math.round(view.scale * 100) }}%</div>
+            <div class="wm-zoom-info">{{ zoomPercent }}%</div>
           </div>
 
           <p class="wm-canvas-hint">
@@ -233,6 +233,7 @@ import {
 import { useProjectStore } from '@/store/project'
 import { locationApi } from '@/api/database'
 import LocationForm from '@/components/database/LocationForm.vue'
+import { useSvgViewport } from '@/composables/useSvgViewport'
 
 const router = useRouter()
 const store = useProjectStore()
@@ -277,10 +278,8 @@ const editorVisible = ref(false)
 const editingId = ref(null)
 const formModel = ref(null)
 
-// 视图变换：scale + translate（基于 viewBox 坐标系）
-const view = reactive({ scale: 1, tx: 0, ty: 0 })
-const isDragging = ref(false)
-const dragStart = reactive({ x: 0, y: 0, tx: 0, ty: 0 })
+// 视图变换（scale + translate + 拖拽平移 + 滚轮缩放 + 坐标换算）见下方
+// useSvgViewport（Phase 3.3，与 CharacterRelationView 共用一份实现）
 
 async function load() {
   if (!projectId.value) return
@@ -384,6 +383,18 @@ const vb = computed(() => {
 
 const viewBoxStr = computed(() => `${vb.value.x} ${vb.value.y} ${vb.value.w} ${vb.value.h}`)
 
+// 视图变换（scale + translate + 拖拽平移 + 滚轮缩放 + 坐标换算）
+// 抽到 useSvgViewport composable（Phase 3.3，与 CharacterRelationView 共用一份实现）
+// ⚠️ 必须在 `vb` 定义之后调用：getViewBox 闭包引用 vb.value，虽然用了惰性函数，
+// 但保持定义顺序可读性更好、也避免 TDZ 类误判。
+const {
+  view, isDragging,
+  clientToSvg, screenToContent,
+  zoomAt, zoomBy, resetView,
+  startPan, movePan, endPan, onWheel,
+  contentTransform, zoomPercent,
+} = useSvgViewport(() => vb.value, { svgRef: svgEl })
+
 // 渲染时的总缩放（基础 * 视图）
 const renderScale = computed(() => baseScale.value * view.scale)
 
@@ -469,23 +480,8 @@ function niceStep(span) {
   return mult * pow
 }
 
-// 工具：把鼠标像素坐标转成 viewBox 坐标
-// 关键：SVG 用了 preserveAspectRatio="xMidYMid meet"，元素与 viewBox 宽高比不一致时
-// 浏览器会居中留黑边（letterbox）。这里必须按 meet 的真实缩放比 + 居中偏移反算，
-// 否则越远离中心误差越大，拖拽地点会明显「跟不上」鼠标。
-function clientToSvg(clientX, clientY) {
-  const rect = svgEl.value?.getBoundingClientRect()
-  if (!rect) return { x: 0, y: 0 }
-  const vbw = vb.value.w
-  const vbh = vb.value.h
-  const scale = Math.min(rect.width / vbw, rect.height / vbh) // meet：取较小缩放比
-  const offX = (rect.width - vbw * scale) / 2 // 居中留黑边产生的水平偏移
-  const offY = (rect.height - vbh * scale) / 2 // 居中留黑边产生的垂直偏移
-  return {
-    x: (clientX - rect.left - offX) / scale,
-    y: (clientY - rect.top - offY) / scale,
-  }
-}
+// 工具：鼠标像素坐标 → viewBox 坐标的 meet 偏移换算已抽到 useSvgViewport
+// （见文件上方解构出的 clientToSvg），此处不再重复实现。
 
 // viewBox 坐标 → 世界坐标
 function svgToWorld(sx, sy) {
@@ -504,25 +500,16 @@ function screenToWorld(clientX, clientY) {
 
 // 屏幕坐标 → 世界坐标（使用指定的 bounds/baseScale，用于拖拽地点时冻结投影）
 function screenToWorldWith(clientX, clientY, b, s) {
-  const p = clientToSvg(clientX, clientY)
-  const nx = (p.x - view.tx) / view.scale
-  const ny = (p.y - view.ty) / view.scale
+  const nx = screenToContent(clientX, clientY).x
+  const ny = screenToContent(clientX, clientY).y
   return {
     x: b.minX + (nx - LEFT_PAD) / s,
     y: b.maxY - (ny - TOP_PAD) / s,
   }
 }
 
-// 交互：拖拽空白处平移
-function onMouseDown(e) {
-  if (e.button !== 0) return
-  isDragging.value = true
-  const p = clientToSvg(e.clientX, e.clientY)
-  dragStart.x = p.x
-  dragStart.y = p.y
-  dragStart.tx = view.tx
-  dragStart.ty = view.ty
-}
+// 交互：拖拽空白处平移（startPan 来自 useSvgViewport；包装函数顺带记录客户端起点，
+// 供 onSvgBlankClick 判定"是拖动还是点击"）
 
 // 在某个地点上按下：进入「拖拽改坐标」模式（阻止冒泡，避免触发地图平移）
 function onLocMouseDown(e, loc) {
@@ -553,10 +540,8 @@ function onMouseMove(e) {
     }
     return
   }
-  if (!isDragging.value) return
-  const p = clientToSvg(e.clientX, e.clientY)
-  view.tx = dragStart.tx + (p.x - dragStart.x)
-  view.ty = dragStart.ty + (p.y - dragStart.y)
+  // 平移视图（实现见 useSvgViewport.movePan；返回 false 表示未在拖拽）
+  movePan(e)
 }
 
 async function onMouseUp() {
@@ -594,33 +579,10 @@ async function onMouseUp() {
     locMoved.value = false
     return
   }
-  isDragging.value = false
+  endPan()
 }
 
-// 交互：滚轮缩放（以鼠标指针为锚点，使用 viewBox 坐标）
-function onWheel(e) {
-  const p = clientToSvg(e.clientX, e.clientY)
-  const scaleFactor = e.deltaY < 0 ? 1.15 : 1 / 1.15
-  zoomAt(p.x, p.y, scaleFactor)
-}
-
-function zoomAt(svgX, svgY, factor) {
-  const newScale = Math.min(Math.max(view.scale * factor, 0.2), 5)
-  const ratio = newScale / view.scale
-  view.tx = svgX - (svgX - view.tx) * ratio
-  view.ty = svgY - (svgY - view.ty) * ratio
-  view.scale = newScale
-}
-
-function zoomBy(factor) {
-  zoomAt(vb.value.x + vb.value.w / 2, vb.value.y + vb.value.h / 2, factor)
-}
-
-function resetView() {
-  view.scale = 1
-  view.tx = 0
-  view.ty = 0
-}
+// 交互：滚轮缩放（以鼠标指针为锚点）—— 实现在 useSvgViewport.onWheel
 
 const selected = computed(() => currentPlaneLocs.value.find((l) => l.id === selectedId.value) || null)
 
@@ -660,8 +622,18 @@ function fmt(v) {
 function select(loc) { selectedId.value = loc.id }
 
 // 点击空白处：取消选中（新建统一用右键，避免误建）
+// ⚠️ 判定「是否拖动过」用的是**客户端像素**位移。原先这里错把 dragStart（viewBox 坐标）
+// 当客户端坐标比较，scale≈1/tx=0 时两者接近才没暴露；缩放平移后会误判（拖动被当成点击）。
+// 故平移到本地记录 px 起点，而非复用 composable 的 dragStart。
+const panClientStart = { x: 0, y: 0 }
+const _startPan = startPan
+function onMouseDownPan(e) {
+  panClientStart.x = e.clientX
+  panClientStart.y = e.clientY
+  _startPan(e)
+}
 function onSvgBlankClick(e) {
-  const moved = Math.hypot(e.clientX - dragStart.x, e.clientY - dragStart.y)
+  const moved = Math.hypot(e.clientX - panClientStart.x, e.clientY - panClientStart.y)
   if (moved > 4) return
   selectedId.value = null
 }

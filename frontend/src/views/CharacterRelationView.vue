@@ -55,7 +55,7 @@
             <rect :x="vb.x" :y="vb.y" :width="vb.w" :height="vb.h" fill="url(#cr-dots)" />
 
             <!-- 图内容：可平移/缩放 -->
-            <g :transform="`matrix(${view.scale},0,0,${view.scale},${view.tx},${view.ty})`">
+            <g class="cr-content" :transform="contentTransform">
               <!-- 关系边 -->
               <g
                 v-for="e in edges"
@@ -109,7 +109,7 @@
               <el-button :icon="ZoomOut" title="缩小" @click="zoomBy(1 / 1.2)" />
               <el-button :icon="RefreshRight" title="重置视图" @click="resetView" />
             </el-button-group>
-            <div class="cr-zoom-info">{{ Math.round(view.scale * 100) }}%</div>
+            <div class="cr-zoom-info">{{ zoomPercent }}%</div>
           </div>
 
           <!-- 图例 -->
@@ -286,6 +286,7 @@ import {
 import { useProjectStore } from '@/store/project'
 import { characterApi, relationApi } from '@/api/database'
 import CharacterForm from '@/components/database/CharacterForm.vue'
+import { useSvgViewport } from '@/composables/useSvgViewport'
 
 const router = useRouter()
 const store = useProjectStore()
@@ -301,10 +302,8 @@ const loading = ref(false)
 // 节点布局坐标（SVG 画布坐标系，可拖拽持久化）
 const pos = reactive({})
 
-// 视图变换：scale + translate
-const view = reactive({ scale: 1, tx: 0, ty: 0 })
-const isDragging = ref(false)
-const dragStart = reactive({ x: 0, y: 0, tx: 0, ty: 0 })
+// 视图变换（scale + translate + 拖拽平移 + 滚轮缩放 + 坐标换算）见下方 useSvgViewport
+// （Phase 3.3 抽公共实现，与 WorldMapView 共用一份）
 
 // 拖拽节点
 const draggingNodeId = ref(null)
@@ -427,18 +426,19 @@ const vb = computed(() => {
 })
 const viewBoxStr = computed(() => `${vb.value.x} ${vb.value.y} ${vb.value.w} ${vb.value.h}`)
 
-function clientToSvg(clientX, clientY) {
-  const rect = svgEl.value?.getBoundingClientRect()
-  if (!rect) return { x: 0, y: 0 }
-  const vbw = vb.value.w, vbh = vb.value.h
-  const scale = Math.min(rect.width / vbw, rect.height / vbh)
-  const offX = (rect.width - vbw * scale) / 2
-  const offY = (rect.height - vbh * scale) / 2
-  return { x: (clientX - rect.left - offX) / scale, y: (clientY - rect.top - offY) / scale }
-}
+// 视图变换（scale + translate + 拖拽平移 + 滚轮缩放 + 坐标换算）
+// Phase 3.3 抽到 useSvgViewport，与 WorldMapView 共用一份实现
+const {
+  view, isDragging,
+  clientToSvg, screenToContent,
+  zoomAt, zoomBy, resetView,
+  startPan, movePan, endPan, onWheel,
+  contentTransform, zoomPercent,
+} = useSvgViewport(() => vb.value, { svgRef: svgEl })
+
 function screenToGraph(clientX, clientY) {
-  const p = clientToSvg(clientX, clientY)
-  return { x: (p.x - view.tx) / view.scale, y: (p.y - view.ty) / view.scale }
+  const p = screenToContent(clientX, clientY)
+  return { x: p.x, y: p.y }
 }
 
 // ---- 力导向布局 ----
@@ -521,13 +521,15 @@ async function load() {
   }
 }
 
-// ---- 平移 / 缩放 ----
+// ---- 平移 / 缩放（实现在 useSvgViewport）----
+// 包装 startPan 以记录**客户端像素**起点，供 onSvgBlankClick 判定「是拖动还是点击」。
+// ⚠️ 不能用 composable 的 dragStart（那是 viewBox/内容坐标），两者量纲不同：
+// scale≈1 且 tx=0 时恰好接近，缩放平移后会误判（拖动被当成点击）。
+const panClientStart = { x: 0, y: 0 }
 function onMouseDown(e) {
-  if (e.button !== 0) return
-  isDragging.value = true
-  const p = clientToSvg(e.clientX, e.clientY)
-  dragStart.x = p.x; dragStart.y = p.y
-  dragStart.tx = view.tx; dragStart.ty = view.ty
+  panClientStart.x = e.clientX
+  panClientStart.y = e.clientY
+  startPan(e)
 }
 function onMouseMove(e) {
   if (draggingNodeId.value) {
@@ -536,10 +538,7 @@ function onMouseMove(e) {
     nodeMoved.value = true
     return
   }
-  if (!isDragging.value) return
-  const p = clientToSvg(e.clientX, e.clientY)
-  view.tx = dragStart.tx + (p.x - dragStart.x)
-  view.ty = dragStart.ty + (p.y - dragStart.y)
+  movePan(e)
 }
 async function onMouseUp() {
   if (draggingNodeId.value) {
@@ -558,22 +557,8 @@ async function onMouseUp() {
     nodeMoved.value = false
     return
   }
-  isDragging.value = false
+  endPan()
 }
-function onWheel(e) {
-  const p = clientToSvg(e.clientX, e.clientY)
-  const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15
-  zoomAt(p.x, p.y, factor)
-}
-function zoomAt(svgX, svgY, factor) {
-  const newScale = Math.min(Math.max(view.scale * factor, 0.2), 5)
-  const ratio = newScale / view.scale
-  view.tx = svgX - (svgX - view.tx) * ratio
-  view.ty = svgY - (svgY - view.ty) * ratio
-  view.scale = newScale
-}
-function zoomBy(factor) { zoomAt(vb.value.x + vb.value.w / 2, vb.value.y + vb.value.h / 2, factor) }
-function resetView() { view.scale = 1; view.tx = 0; view.ty = 0 }
 
 // ---- 节点交互 ----
 function onNodeMouseDown(e, n) {
@@ -598,7 +583,7 @@ function onNodeDblClick(n) { openEditCharacter(n) }
 function onEdgeClick(e) { selected.kind = 'edge'; selected.id = e.id }
 
 function onSvgBlankClick(e) {
-  const moved = Math.hypot(e.clientX - dragStart.x, e.clientY - dragStart.y)
+  const moved = Math.hypot(e.clientX - panClientStart.x, e.clientY - panClientStart.y)
   if (moved > 4) return
   if (linkingSourceId.value) { cancelLink(); return }
   selected.kind = null; selected.id = null

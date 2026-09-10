@@ -1,5 +1,6 @@
 // 工作流 API 封装（全局共享） —— 后端 /api/v1/workflows
 import http from './http'
+import { readSseStream } from '@/utils/sse'
 
 function buildSearch(params = {}) {
   const out = {}
@@ -29,32 +30,12 @@ export async function workflowRunStream(wfId, inputs, onEvent) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ inputs }),
   })
-  if (!resp.ok) {
-    // 后端把配置错误（单 start/end、环等）作为 400 提前暴露
-    let msg = `运行接口返回 ${resp.status}`
-    try {
-      const body = await resp.json()
-      if (body?.message) msg = body.message
-    } catch { /* 非 JSON 错误体，保留默认提示 */ }
-    throw new Error(msg)
-  }
-  const reader = resp.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const blocks = buffer.split('\n\n')
-    buffer = blocks.pop() || ''
-    for (const block of blocks) {
-      const ev = /event: (.+)/.exec(block)
-      const data = /data: (.+)/.exec(block)
-      if (ev && data) {
-        try {
-          onEvent?.(ev[1], JSON.parse(data[1]))
-        } catch { /* 忽略单条畸形 SSE */ }
-      }
-    }
-  }
+  // 状态校验 / 读流统一在 readSseStream（Phase 3.3）。
+  // 后端把配置错误（单 start/end、环等）作为 400 提前暴露，错误体 message 优于状态码 → errorPrefix 会被 detail 覆盖。
+  // 本地工作流不容忍畸形帧（错误应尽早暴露）→ tolerant: false。
+  await readSseStream(resp, onEvent, {
+    errorPrefix: '运行接口',
+    tolerant: false,
+  })
 }
+

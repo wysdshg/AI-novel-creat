@@ -6,6 +6,16 @@
 ---
 
 ## 2026-09-10
+- **Phase 3.3 抽公共 SSE 工具 + SVG 视口 composable（消 4 份 + 2 份重复，顺带修 2 个真 bug）**：
+  - **`frontend/src/utils/sse.js`（新）**：抽出 `createSseParser`（纯解析器，可单测）/ `readSseStream`（**HTTP 状态校验 → 读流 → 超时/外部中止 + `GenerationStopped` 语义**）/ `createTimeoutController` / `postSseStream`（一站式 POST+读流）。改造前 `chapter.js` / `discussion.js`（2 处）/ `workflow.js` **各自手写**「`getReader` + `TextDecoder` + `split('\n\n')` + 正则抠 `event:`/`data:`」，差异只在错误容忍度与超时处理——**正是这种"看着差不多"的复制最容易修 bug 时漏改其中一处**。净减 **175 行 → 36 行**。
+    - 差异参数化：`errorPrefix`（各接口 400/500 文案，如「章节生成接口」——用户直接看到这句话）、`stoppedMessage`（默认「已停止生成」）、`tolerant`（`false` 供本地工作流：畸形 SSE 直接抛、错误尽早暴露；默认 `true` 供长对话流：单条畸形数据跳过、不杀死整条流）。`SSE_TIMEOUT_MS = 180000` 与 axios timeout 对齐。
+    - **保留并集中了那条易踩的注释**：必须显式校验 HTTP 状态——后端 400/500 返回 JSON 错误体（不是 SSE），不校验就会拿它当事件流解析 → 前端"完全没有输出"、真实错误被吞（见 04-C13）。
+  - **`frontend/src/composables/useSvgViewport.js`（新）**：抽出 `view{scale,tx,ty}` + `clientToSvg`（**`preserveAspectRatio="xMidYMid meet"` 的居中留黑边偏移换算——本 composable 的核心价值，两个视图都曾各自踩过这个坑**）+ `screenToContent` + `zoomAt`/`zoomBy`/`resetView` + `startPan`/`movePan`/`endPan`/`onWheel` + `contentTransform`/`zoomPercent`。常量化 `ZOOM_STEP=1.15` / `ZOOM_MIN=0.2` / `ZOOM_MAX=5`。`WorldMapView.vue` **106→57 行**、`CharacterRelationView.vue` **71→44 行**。
+  - **顺带修掉 2 个真 bug**（都不是重构引入，是原本就存在的）：
+    1. **两视图 `onSvgBlankClick` 量纲错误**：都把 composable 的 `dragStart`（**viewBox 内容坐标**）当**客户端像素**去算位移，`scale≈1 且 tx=0` 时两者恰巧接近才一直没暴露；一旦缩放平移，**"拖动平移"会被误判成"点击空白"**（清空选中/取消连线）。已在两视图各自本地记录 `panClientStart`（客户端像素）——**刻意不从 composable 取**，因为它给的是内容坐标、语义不同。
+    2. **内容层 `<g>` 无稳定选择器**：给两个内容层补 `cr-content` / `wm-content` 类名（原先测试只能靠 `<g>` 序号猜，已实际踩中：WorldMap 的首个 `<g>` 是罗盘组，取错导致断言假失败）。
+  - **真机验证（Playwright + 本机 Chromium，用户 8000/5173 全程未动）**：**20/20 全过** —— 两视图的 SVG 渲染、初始 100%、内容层 `matrix()`、放大→120%、缩小→回落、重置→`matrix(1,0,0,1,0,0)`、滚轮以指针为锚点缩放、拖拽平移（matrix 位移分量确实变化）、以及**「拖动空白不产生误判副作用」**。控制台仅剩**既有** favicon 404（已 curl 验证 5173/8000 均返回 404，纯外观问题、与本次改动无关）。验证用的临时脚本、临时作品（含 2 角色/1 关系/2 地点）已全部清理，作品数归 0。
+  - **后端全量单测 144 passed**（纯前端改动，零回归）；`vite build` 通过（1737 modules）。
 - **Phase 3.2 合并 `discussion.py` 两处 80 行重复（两阶段 LOAD_REFS 流式）**：
   - `/discussion/chat` 与 `/discussion/global-chat` 里**各存一份**约 80 行的两阶段参考加载 + 流式生成逻辑，**唯一差异只是日志前缀**——任一处修 bug 漏改另一处就是潜在缺陷，故抽成 `_stream_two_phase()`（`discussion.py` **896→859 行**）。
   - **接口设计**：`assistant_text` / `assistant_thinking` 由调用方**传引用**进去追加——调用方 `finally` 里要用它们持久化落库，传引用比返回值再拆包更稳（也避免合并后漏收集导致「对话没存上」）；返回值是观测增量 dict，调用方 `obs.update(...)` 后落 `discussion_load_logs`。
