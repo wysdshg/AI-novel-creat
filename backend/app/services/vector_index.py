@@ -3,6 +3,7 @@
 所有对外函数都保证「失败不炸主流程」：key 缺失 / API 失败 / 开关关闭
 一律静默跳过并返回 0——向量检索是增强能力，绝不能阻断写后摄取。
 """
+import logging
 import uuid
 
 from sqlalchemy.orm import Session
@@ -19,6 +20,9 @@ KEY_SILICONFLOW_KEY = "retrieval.siliconflow_key"
 
 ST_REF_DOC = "ref_doc"
 ST_CHAPTER_MEMORY = "chapter_memory"
+
+
+logger = logging.getLogger(__name__)
 
 
 def enabled(db: Session) -> bool:
@@ -75,7 +79,7 @@ def index_chunks(db: Session, project_id: str, source_type: str, source_id: str,
         from app.models.orm import ProjectORM
         if project_id != GLOBAL_PROJECT_ID:
             if db.query(ProjectORM).filter_by(id=project_id).first() is None:
-                print(f"[vector_index] 项目 {str(project_id)[:8]} 已不存在，跳过向量写入")
+                logger.warning(f"[vector_index] 项目 {str(project_id)[:8]} 已不存在，跳过向量写入")
                 return 0
     except Exception:  # noqa: BLE001
         pass  # 校验本身失败不应阻断索引（宁可写也不要静默不索引）
@@ -83,7 +87,7 @@ def index_chunks(db: Session, project_id: str, source_type: str, source_id: str,
     try:
         vecs = embedding_client.embed_texts(chunks, db=db)
     except Exception as e:  # noqa: BLE001
-        print(f"[vector_index] embedding 不可用，跳过索引: {type(e).__name__}: {str(e)[:120]}")
+        logger.warning(f"[vector_index] embedding 不可用，跳过索引: {type(e).__name__}: {str(e)[:120]}")
         return 0
     model = embedding_client.embed_model_name()
     store = get_store(db)
@@ -104,7 +108,7 @@ def index_chunks(db: Session, project_id: str, source_type: str, source_id: str,
         store.upsert(db, rows)
         return len(rows)
     except Exception as e:  # noqa: BLE001
-        print(f"[vector_index] 向量入库失败: {type(e).__name__}: {str(e)[:120]}")
+        logger.warning(f"[vector_index] 向量入库失败: {type(e).__name__}: {str(e)[:120]}")
         return 0
 
 
@@ -172,7 +176,7 @@ def sync_after_ingest(db: Session, project_id: str, memory_id: str,
             stats["memory_chunks"] = index_chunks(
                 db, project_id, ST_CHAPTER_MEMORY, mem.id, _chunk_text("\n\n".join(x for x in parts if x)))
     except Exception as e:  # noqa: BLE001
-        print(f"[vector_index] 章级记忆索引失败: {type(e).__name__}: {str(e)[:120]}")
+        logger.warning(f"[vector_index] 章级记忆索引失败: {type(e).__name__}: {str(e)[:120]}")
 
     if article_id:
         try:
@@ -184,7 +188,7 @@ def sync_after_ingest(db: Session, project_id: str, memory_id: str,
             if doc is not None and (doc.content_text or "").strip():
                 stats["digest_chunks"] = index_reference_doc(db, doc)
         except Exception as e:  # noqa: BLE001
-            print(f"[vector_index] 篇章摘要索引失败: {type(e).__name__}: {str(e)[:120]}")
+            logger.warning(f"[vector_index] 篇章摘要索引失败: {type(e).__name__}: {str(e)[:120]}")
     return stats
 
 
@@ -197,5 +201,5 @@ def search_similar(db: Session, project_id: str, source_type: str,
         vecs = embedding_client.embed_texts([query_text], db=db)
         return get_store(db).search(db, project_id, source_type, vecs[0], top_k=top_k)
     except Exception as e:  # noqa: BLE001
-        print(f"[vector_index] 向量检索失败: {type(e).__name__}: {str(e)[:120]}")
+        logger.warning(f"[vector_index] 向量检索失败: {type(e).__name__}: {str(e)[:120]}")
         return []

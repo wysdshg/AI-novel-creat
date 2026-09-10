@@ -5,16 +5,20 @@
 - 详情 / 修改 / 删除（级联清空该作品下所有业务数据）。
 所有操作按 project_id 隔离，保证不同小说数据互不干扰。
 """
+import logging
 import uuid
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from app.models.orm import (
     ProjectORM, CharacterORM, SkillORM, RelationORM, FactionORM,
-    ForeshadowORM, ChapterORM, DiscussionMessageORM, DirectionORM, OutlineORM,
+    ForeshadowORM, ChapterORM, DiscussionMessageORM, OutlineORM,
     VolumeORM, ArticleORM, ReferenceDocORM, LocationORM,
     ChapterMemoryORM, StageSummaryORM, DiscussionLoadLogORM,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def _to_dict(orm: ProjectORM, chapter_count: int = 0) -> dict:
@@ -85,7 +89,7 @@ def update_project(db: Session, project_id: str, data: dict) -> dict | None:
 # 4 级结构相关（卷/篇/章）与参考、记忆、阶段摘要、加载日志均在列，避免孤儿行。
 _RELATED = [
     CharacterORM, SkillORM, RelationORM, FactionORM, LocationORM,
-    ForeshadowORM, ChapterORM, DiscussionMessageORM, DirectionORM, OutlineORM,
+    ForeshadowORM, ChapterORM, DiscussionMessageORM, OutlineORM,
     VolumeORM, ArticleORM, ReferenceDocORM,
     ChapterMemoryORM, StageSummaryORM, DiscussionLoadLogORM,
 ]
@@ -101,7 +105,7 @@ def delete_project(db: Session, project_id: str) -> bool:
         from app.services import vector_store
         vector_store.remove_project_index(db, project_id)
     except Exception as e:  # noqa: BLE001
-        print(f"[project_crud] 清理向量块跳过: {type(e).__name__}: {e}")
+        logger.warning(f"[project_crud] 清理向量块跳过: {type(e).__name__}: {e}")
     for table in _RELATED:
         db.query(table).filter(table.project_id == project_id).delete()
     db.delete(orm)

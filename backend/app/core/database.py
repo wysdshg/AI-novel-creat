@@ -6,6 +6,7 @@
   保证角色库等模块开箱即可访问；
 - get_session 是 FastAPI 依赖，提供请求级数据库会话。
 """
+import logging
 from pathlib import Path
 from sqlalchemy import create_engine, event, Engine
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
@@ -16,6 +17,9 @@ Base = declarative_base()
 
 _engine = None
 SessionLocal = None
+
+
+logger = logging.getLogger(__name__)
 
 
 @event.listens_for(Engine, "connect")
@@ -138,9 +142,9 @@ def init_db():
     try:
         added = _auto_migrate(engine)
         if added:
-            print(f"[init_db] 自动迁移新增列: {', '.join(added)}")
+            logger.info(f"[init_db] 自动迁移新增列: {', '.join(added)}")
     except Exception as e:  # 迁移失败不应阻断启动
-        print(f"[init_db] 自动迁移跳过/失败: {e}")
+        logger.warning(f"[init_db] 自动迁移跳过/失败: {e}")
     _ensure_vec_index(engine)
 
 
@@ -161,7 +165,7 @@ def _ensure_vec_index(engine):
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_index'"
             )).fetchone()
             if row is not None and "project_id" not in (row[0] or ""):
-                print("[init_db] vec_index 为旧 schema（缺 project_id 辅助列），删除重建")
+                logger.info("[init_db] vec_index 为旧 schema（缺 project_id 辅助列），删除重建")
                 conn.execute(text("DROP TABLE vec_index"))
                 conn.commit()
                 row = None
@@ -186,6 +190,6 @@ def _ensure_vec_index(engine):
                     with Session(engine) as s:
                         n = rebuild_vec_index(s)
                         s.commit()
-                    print(f"[init_db] vec_index 已从 vector_chunks 回填 {n} 块")
+                    logger.info(f"[init_db] vec_index 已从 vector_chunks 回填 {n} 块")
     except Exception as e:  # noqa: BLE001
-        print(f"[init_db] vec_index 虚拟表不可用（向量检索走暴力回退）: {type(e).__name__}: {e}")
+        logger.warning(f"[init_db] vec_index 虚拟表不可用（向量检索走暴力回退）: {type(e).__name__}: {e}")

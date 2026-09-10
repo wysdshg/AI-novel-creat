@@ -14,18 +14,8 @@ function createTimeoutController(ms = SSE_TIMEOUT_MS) {
 export async function discussionChatStream(projectId, body, onEvent, chapterId) {
   const q = chapterId ? `?chapter_id=${encodeURIComponent(chapterId)}` : ''
   const url = `/api/v1/projects/${projectId}/discussion/chat${q}`
-  console.group('📤 [SSE] discussion/chat 请求')
-  console.log('URL:', url)
-  console.log('Body:', JSON.stringify(body, null, 2))
-  console.log('消息条数:', body.messages?.length)
-  if (body.messages?.length) {
-    console.log('最后一条用户消息:', body.messages[body.messages.length - 1]?.content?.slice(0, 200))
-    console.log('system prompt 长度:', body.messages[0]?.content?.length || 0, '字符')
-  }
-  console.log('model_id:', body.model_id)
-  console.log('enable_thinking:', body.enable_thinking)
-  console.log('conversation_id:', body.conversation_id)
-  console.groupEnd()
+  // 注意：此处曾有 console.group 打印完整 Body / 最后一条用户消息正文 / system prompt。
+  // 属隐私泄漏（用户输入全文进控制台），已移除（问题 1.1）。排查时只打无内容信息（条数/开关）。
   const { controller, cleanup } = createTimeoutController()
   try {
     const resp = await fetch(`/api/v1/projects/${projectId}/discussion/chat${q}`, {
@@ -66,16 +56,8 @@ export async function discussionChatStream(projectId, body, onEvent, chapterId) 
 // 全局对话（无需选择小说，类似豆包/ChatGPT 通用助手模式）
 // 注入全局设定库 + 全局 SKILL，不含任何小说数据
 export async function discussionGlobalChatStream(body, onEvent) {
-  console.group('📤 [SSE] global-chat 请求')
-  console.log('URL: /api/v1/discussion/global-chat')
-  console.log('Body:', JSON.stringify(body, null, 2))
-  console.log('消息条数:', body.messages?.length)
-  if (body.messages?.length) {
-    console.log('最后一条用户消息:', body.messages[body.messages.length - 1]?.content?.slice(0, 200))
-    console.log('system prompt 长度:', body.messages[0]?.content?.length || 0, '字符')
-  }
-  console.log('model_id:', body.model_id)
-  console.groupEnd()
+  // 注意：此处曾有 console.group 打印完整 Body / 最后一条用户消息正文，属隐私泄漏，
+  // 已移除（问题 1.1）。
   const { controller, cleanup } = createTimeoutController()
   try {
     const resp = await fetch('/api/v1/discussion/global-chat', {

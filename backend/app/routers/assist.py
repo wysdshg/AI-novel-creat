@@ -5,6 +5,7 @@ AI 提出建议，作者点确认，系统才真正落库。
 默认走这条路而不是让模型直接写表：本地小模型抽错一个境界，
 后面每一章都会跟着错，代价远大于多点一次鼠标。
 """
+import logging
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
@@ -26,6 +27,9 @@ router = APIRouter(tags=["AI 辅助"])
 # ===========================================================================
 # 需求 5：AI 味检测
 # ===========================================================================
+
+logger = logging.getLogger(__name__)
+
 
 class ScanRequest(BaseModel):
     text: str
@@ -343,10 +347,12 @@ def polish_element(project_id: str, body: PolishElementRequest,
     except Exception as e:  # noqa: BLE001
         return fail(50201, f"模型调用失败：{str(e)[:200]}")
 
-    print(f"[polish-element] 模型原始返回（未清洗）: {text[:1000]!r}", flush=True)
+    # ⚠️ 曾打印模型原始返回前 1000 字（含用户文本内容）——隐私泄漏，改为只记长度（问题 1.1）。
+    # 需要看原文时临时打开，排查完删除。
+    logger.info(f"[polish-element] 模型返回 {len(text or '')} 字，待清洗")
     text = _strip_wrapper(text)
     if not text:
-        print(f"[polish-element] 清洗后为空: vendor={vendor} model={default.model_name}", flush=True)
+        logger.info(f"[polish-element] 清洗后为空: vendor={vendor} model={default.model_name}")
         return fail(50202, "模型返回为空，请重试")
     return ok({"text": text, "mode": mode})
 

@@ -9,6 +9,7 @@
    再处理 relations（用角色姓名解析为 character id，跳过重复/无法解析）。
 5. 返回 {reply, changes, model_ok}，changes 是四类实体的变更明细。
 """
+import logging
 import json
 import math
 import re
@@ -64,6 +65,9 @@ _LIST_CHAR_FIELDS = ("skills", "relationship_network")
 _LIST_FIELDS = ("skills", "relationship_network", "notable_features", "members")
 
 
+logger = logging.getLogger(__name__)
+
+
 def _as_list(v):
     """把模型可能返回的字符串/列表规范成字符串列表。"""
     if v is None:
@@ -108,13 +112,13 @@ def _sanitize_characters(data: dict) -> None:
         # gender 超过 2 字符 → 模型塞了描述文字，清空让用户/brief 承担
         g = (c.get("gender") or "").strip()
         if g and g not in _GENDER_VALUES:
-            print(f"[config_command] gender 字段异常({g!r})，已清除")
+            logger.warning(f"[config_command] gender 字段异常({g!r})，已清除")
             c.pop("gender", None)
 
         # role_type 不在白名单 → 清除
         rt = (c.get("role_type") or "").strip()
         if rt and rt not in _ROLE_TYPE_VALUES:
-            print(f"[config_command] role_type 字段异常({rt!r})，已清除")
+            logger.warning(f"[config_command] role_type 字段异常({rt!r})，已清除")
             c.pop("role_type", None)
 
         # age 不是整数 → 尝试提取数字，失败则清除
@@ -123,7 +127,7 @@ def _sanitize_characters(data: dict) -> None:
             try:
                 c["age"] =int(str(a).strip())
             except (ValueError, TypeError):
-                print(f"[config_command] age 字段异常({a!r})，已清除")
+                logger.warning(f"[config_command] age 字段异常({a!r})，已清除")
                 c.pop("age", None)
 
 

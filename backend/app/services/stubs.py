@@ -105,12 +105,6 @@ def get_active_foreshadows(project_id: str) -> list:
     return []
 
 
-# ---------- 走向推荐 ----------
-def recommend_directions(project_id: str, chapter_id: str) -> list:
-    # TODO: 读取结尾剧情/人物状态/未触发伏笔 → 推演 3~5 条，温度 0.7
-    return []
-
-
 # ---------- 套路模板 ----------
 def list_templates() -> list:
     # TODO: 返回内置模板库（秘境夺宝/宗门大比/…）

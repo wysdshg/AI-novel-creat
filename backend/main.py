@@ -6,6 +6,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core.logging_config import setup_logging
 from app.core.response import ok
 from app.core.database import init_db
 from app.routers import (
@@ -16,7 +17,6 @@ from app.routers import (
     model,
     memory,
     foreshadow,
-    direction,
     template,
     references,
     # ——本轮（用户大任务 1）新增的三大全局模块：——
@@ -31,6 +31,10 @@ from app.routers import (
     # ——AI 能力层：去AI味检测 / SKILL 调度查询 / 全局配置 / 实体确认入库 ——
     assist,
 )
+
+# 统一日志：必须在任何业务模块打日志之前初始化，否则 INFO 级日志会被
+# logging 的「last resort」处理器（仅 WARNING+）静默丢掉。级别可用 NA_LOG_LEVEL 覆盖。
+setup_logging()
 
 app = FastAPI(
     title="网页小说智能体 API",
@@ -50,7 +54,7 @@ app.add_middleware(
 # 统一挂载各模块路由；prefix 与 API接口规范.md 的 /api/v1 一致
 for r in (
     projects, database, chapter, discussion, model, memory,
-    foreshadow, direction, template, references,
+    foreshadow, template, references,
     setting, custom_skill, workflow,                 # 本轮新增的三大全局模块
     volume, article,                                 # 4 级结构：卷 / 篇
     reference_global,                                 # 全局参考资料池

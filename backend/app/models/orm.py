@@ -237,18 +237,6 @@ class ModelConfigORM(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
-class DirectionORM(Base):
-    __tablename__ = "directions"
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    project_id: Mapped[str] = mapped_column(String(36), index=True)
-    chapter_id: Mapped[str] = mapped_column(String(36))
-    core_conflict: Mapped[str] = mapped_column(Text)
-    applicable_foreshadows: Mapped[list] = mapped_column(JSON, default=list)
-    character_change: Mapped[str | None] = mapped_column(Text, nullable=True)
-    style_bias: Mapped[str | None] = mapped_column(String(40), nullable=True)
-    confidence: Mapped[float] = mapped_column(Float, default=0.0)
-
-
 class OutlineORM(Base):
     __tablename__ = "outlines"
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

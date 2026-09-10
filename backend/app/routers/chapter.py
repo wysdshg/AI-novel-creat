@@ -8,6 +8,7 @@ SSE 事件序列：
   start → context（这次读了哪些资料）→ chunk* → validate（AI 味检测）
   → saved（章节已落库）→ ingest（记忆抽取 + 走向建议）→ done
 """
+import logging
 import json
 import os
 import re
@@ -35,6 +36,9 @@ router = APIRouter(tags=["章节生成"])
 # ──────────────────────────────────────────────
 # 重复循环检测器（防小模型长文本复读）
 # ──────────────────────────────────────────────
+logger = logging.getLogger(__name__)
+
+
 class _RepetitionGuard:
     """流式重复循环检测。
 
@@ -205,6 +209,20 @@ def _sse(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _can_persist(full: str, error_notes: list[str] | None = None) -> tuple[bool, str]:
+    """本轮生成是否可以落库。返回 (可落库, 不可落库时的原因)。
+
+    铁律（问题 1.2）：**错误/占位提示绝不能变成小说正文**。
+    - 有真实正文 → 可落库（错误提示若同时存在也不影响，因为它压根不在 full 里）；
+    - 正文为空 → 不可落库，返回原因供前端提示。此时若走更新路径，
+      会把已有章节正文覆盖成空/错误文案 —— 静默数据丢失，必须拦住。
+    """
+    if (full or "").strip():
+        return True, ""
+    reason = "；".join(n for n in (error_notes or []) if n).strip()
+    return False, reason or "模型未返回任何正文"
+
+
 def _content_only_stream(stream):
     """把纯字符串流包装成 (kind, text) 元组流（kind 恒为 "content"）。
 
@@ -257,7 +275,7 @@ def _maybe_load_refs(db, project_id, messages, ctx_meta, default, body) -> tuple
         messages[1]["content"] += "\n\n" + extra_text
         ctx_meta = {**ctx_meta, "refs_loaded_extra": [fn for fn, _ in extra], "ref_mode": "hybrid"}
     except Exception as e:  # noqa: BLE001
-        print(f"[generate_chapter] 按需参考加载失败，降级基线: {type(e).__name__}: {e}")
+        logger.warning(f"[generate_chapter] 按需参考加载失败，降级基线: {type(e).__name__}: {e}")
     return messages, ctx_meta
 
 
@@ -288,7 +306,7 @@ def _global_topup_ids(db, project_id, hint: str | None, exclude_ids: set[str], t
         scored.sort(key=lambda x: -x[0])
         return [oid for _, oid in scored[:top_k]]
     except Exception as e:  # noqa: BLE001
-        print(f"[generate_chapter] 全局 top-up 失败: {e}")
+        logger.warning(f"[generate_chapter] 全局 top-up 失败: {e}")
         return []
 
 
@@ -305,7 +323,7 @@ def _background_ingest(project_id: str, chapter_id: str,
         try:
             ch = t_db.query(ChapterORM).filter_by(id=chapter_id).first()
             if ch is None:
-                print(f"[generate_chapter] 后台摄取：章节不存在 id={chapter_id}")
+                logger.info(f"[generate_chapter] 后台摄取：章节不存在 id={chapter_id}")
                 return
             res = ingestion.ingest_chapter(
                 t_db, project_id, ch,
@@ -313,7 +331,7 @@ def _background_ingest(project_id: str, chapter_id: str,
                 push_conversation_id=push_conversation_id,
             )
             t_db.commit()  # 保险：个别 CRUD 未内嵌 commit
-            print(
+            logger.info(
                 f"[generate_chapter] 后台摄取完成: memory={res.get('memory_id')} "
                 f"fallback={res.get('fallback')} dirs={res.get('directions_pushed', 0)}"
             )
@@ -321,16 +339,16 @@ def _background_ingest(project_id: str, chapter_id: str,
             # 概览页自动显示，不再「暂无 AI 概览」占位。失败不影响正文。
             try:
                 agg = ingestion.aggregate_overview(t_db, project_id, ch.article_id, auto=True)
-                print(
+                logger.info(
                     f"[generate_chapter] 概览聚合: 篇={agg.get('articles')} "
                     f"卷={agg.get('volumes')} 小说={agg.get('project')}"
                 )
             except Exception as e:  # noqa: BLE001
-                print(f"[generate_chapter] 概览聚合失败（不影响正文）: {type(e).__name__}: {str(e)[:150]}")
+                logger.warning(f"[generate_chapter] 概览聚合失败（不影响正文）: {type(e).__name__}: {str(e)[:150]}")
         finally:
             t_db.close()
     except Exception as e:  # noqa: BLE001
-        print(f"[generate_chapter] 后台摄取异常: {type(e).__name__}: {str(e)[:200]}")
+        logger.warning(f"[generate_chapter] 后台摄取异常: {type(e).__name__}: {str(e)[:200]}")
 
 
 @router.post("/projects/{project_id}/chapters/generate")
@@ -380,7 +398,7 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
         )
     except Exception as e:  # noqa: BLE001
         # 上下文引擎挂了也得让作者能写字——退回最小提示词
-        print(f"[generate_chapter] 上下文组装失败，降级: {type(e).__name__}: {e}")
+        logger.warning(f"[generate_chapter] 上下文组装失败，降级: {type(e).__name__}: {e}")
         messages = [
             {"role": "system", "content": "你是中文网络小说代笔，只输出本章正文，全中文。"},
             {"role": "user", "content": f"创作第 {chapter_no} 章。要点：{body.prompt_hint or '自行推进剧情'}"},
@@ -429,6 +447,9 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
         if ctx_meta.get("refs_loaded_extra"):
             yield _sse("refs", {"loaded": ctx_meta["refs_loaded_extra"]})
         content_parts = []
+        # 错误/占位提示只用于**推给前端展示**，绝不进入 content_parts——
+        # 否则会被拼进正文落库，错误文案变成小说内容（问题 1.2，2026-09-10 复核仍是活 bug）。
+        error_notes: list[str] = []
         loop_stopped = False
         if use_model:
             # 章节生成温度兜底 0.75：搜索与实践结论——低温(0.4)+无重复惩罚是小模型长文复读主因。
@@ -538,7 +559,7 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
                             # 直到 token 报爆；现在 break 后由 finally 的 gen.close() 关闭底层
                             # HTTP 连接 → 模型立即停止、计费停止。
                             loop_stopped = True
-                            print(f"[generate_chapter] ⚠️ 检测到重复循环，中断生成（已生成 {len(guard.full_text)} 字符）")
+                            logger.warning(f"[generate_chapter] ⚠️ 检测到重复循环，中断生成（已生成 {len(guard.full_text)} 字符）")
                             break
                 finally:
                     # 无论正常结束 / 复读中断 / 客户端断开（GeneratorExit），都关闭上游生成器，
@@ -548,12 +569,13 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
                     except Exception:  # noqa: BLE001
                         pass
             except Exception as e:  # noqa: BLE001
-                content_parts.append(f"\n[模型调用失败，已降级为占位：{str(e)[:200]}]")
-                yield _sse("chunk", {"text": content_parts[-1]})
+                _note = f"[模型调用失败，已降级为占位：{str(e)[:200]}]"
+                error_notes.append(_note)
+                yield _sse("chunk", {"text": "\n" + _note})  # 仅展示，不落库
         else:
-            placeholder = "[章节正文占位 — 未配置可用模型，请在「模型配置」中添加并设为默认]"
-            content_parts.append(placeholder)
-            yield f"event: chunk\ndata: {json.dumps({'text': placeholder}, ensure_ascii=False)}\n\n"
+            _placeholder = "[章节正文占位 — 未配置可用模型，请在「模型配置」中添加并设为默认]"
+            error_notes.append(_placeholder)
+            yield f"event: chunk\ndata: {json.dumps({'text': _placeholder}, ensure_ascii=False)}\n\n"
 
         if loop_stopped:
             # 复读检测截断：给前端明确信号（否则看起来像"卡住"）
@@ -566,16 +588,16 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
             cleaned = _dedup_trailing_repeats(full)
             if len(cleaned) < len(full):
                 trimmed = len(full) - len(cleaned)
-                print(f"[generate_chapter] 后处理去重：裁掉 {trimmed} 字符重复内容")
+                logger.info(f"[generate_chapter] 后处理去重：裁掉 {trimmed} 字符重复内容")
                 full = cleaned
 
         # AI 味检测：纯正则、零 token，不改写正文，只报告
-        if scan_enabled and use_model:
+        if scan_enabled and use_model and full.strip():
             try:
                 report = humanizer.scan(full, scene="novel")
                 yield _sse("validate", report)
             except Exception as e:  # noqa: BLE001
-                print(f"[generate_chapter] AI 味检测失败: {e}")
+                logger.warning(f"[generate_chapter] AI 味检测失败: {e}")
                 yield _sse("validate", {"issues": []})
         else:
             yield _sse("validate", {"issues": []})
@@ -585,6 +607,16 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
         if not use_model and body.chapter_id:
             yield _sse("chunk", {"text": "\n\n[未配置可用模型，已保留原章节正文。请在「模型配置」中添加并设为默认后重试]"})
             yield _sse("done", {"chapter_id": body.chapter_id, "word_count": 0})
+            return
+
+        # ⚠️ 正文为空 → 绝不落库（问题 1.2）。
+        # 两类场景：① 模型调用失败（只产出错误提示，已收进 error_notes，不在 full 里）；
+        # ② 未配置模型且是新建章。落库会让错误提示变成小说正文；更新场景还会**静默抹掉
+        # 已有正文**（数据丢失）。此时只发 error 事件说明原因，不发 saved。
+        can_save, block_reason = _can_persist(full, error_notes)
+        if not can_save:
+            yield _sse("error", {"message": block_reason})
+            yield _sse("done", {"chapter_id": body.chapter_id, "word_count": 0, "saved": False})
             return
 
         # 落库（4 级结构下 article_id 从 body 透传）
@@ -644,7 +676,7 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
                 ).start()
                 yield _sse("ingest_start", {"chapter_id": chapter.id, "async": True})
             except Exception as e:  # noqa: BLE001
-                print(f"[generate_chapter] 启动后台摄取失败: {e}")
+                logger.warning(f"[generate_chapter] 启动后台摄取失败: {e}")
 
         yield _sse("done", {"chapter_id": chapter.id, "word_count": chapter.word_count})
 

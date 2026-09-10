@@ -9,7 +9,11 @@
 本节点为引擎内同步调用，正文落库后直接返回，写后摄取留待后续接入
 （工作流侧可用「代码节点」或二期迭代节点替代）。
 """
+import logging
 from ..base import BaseNode, NodeResult
+
+
+logger = logging.getLogger(__name__)
 
 
 class ChapterNode(BaseNode):
@@ -97,7 +101,7 @@ class ChapterNode(BaseNode):
                 from_discussion=False,
             )
         except Exception as e:  # noqa: BLE001
-            print(f"[workflow/chapter_node] 上下文组装失败，降级: {type(e).__name__}: {e}")
+            logger.warning(f"[workflow/chapter_node] 上下文组装失败，降级: {type(e).__name__}: {e}")
             messages = [
                 {"role": "system", "content": "你是中文网络小说代笔，只输出本章正文，全中文。"},
                 {"role": "user", "content": f"创作第 {chapter_no} 章。要点：{hint or '自行推进剧情'}"},
@@ -147,7 +151,7 @@ class ChapterNode(BaseNode):
         if len(full) > 200:
             cleaned = dedup_trailing_repeats(full)
             if len(cleaned) < len(full):
-                print(f"[workflow/chapter_node] 后处理去重：裁掉 {len(full) - len(cleaned)} 字符")
+                logger.info(f"[workflow/chapter_node] 后处理去重：裁掉 {len(full) - len(cleaned)} 字符")
                 full = cleaned
 
         if not full.strip():

@@ -7,6 +7,7 @@
 小模型对末尾指令的遵循度明显高于夹在中间的指令，
 所以顺序是 世界观/角色/记忆/参考 → 本章要点 → 输出格式。
 """
+import logging
 from sqlalchemy.orm import Session
 import os
 
@@ -88,6 +89,9 @@ _ADVICE_HINTS = (
     "利弊", "优劣", "分析一下", "你觉得", "有什么选择", "哪个好", "如何写", "如何设计",
     "如何安排", "如何推进",
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def is_advice_request(text: str) -> bool:
@@ -184,7 +188,7 @@ def build_chapter_messages(
         else:
             graph_trace = {"enabled": False, "reason": "配置关闭"}
     except Exception as e:  # noqa: BLE001
-        print(f"[builder] 实体图扩展跳过: {type(e).__name__}: {str(e)[:80]}")
+        logger.warning(f"[builder] 实体图扩展跳过: {type(e).__name__}: {str(e)[:80]}")
         graph_trace = {"enabled": True, "error": f"{type(e).__name__}: {str(e)[:80]}"}
 
     # ---------- 2. 逐层取数 ----------
@@ -339,7 +343,7 @@ def build_discussion_system(
         if setting_catalog:
             sys_parts.append(setting_catalog)
     except Exception as e:  # noqa: BLE001
-        print(f"[context.builder] 设定目录构造失败，跳过: {e}")
+        logger.warning(f"[context.builder] 设定目录构造失败，跳过: {e}")
 
     system = "\n\n".join(p for p in sys_parts if p and p.strip())
     meta = {

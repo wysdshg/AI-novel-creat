@@ -3,6 +3,7 @@
 提供 get_references_corpus() 供后续「章节生成」模块检索拼接，
 将本作品全部参考文档文本拼为一段上下文，直接注入生成 Prompt。
 """
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
@@ -20,6 +21,9 @@ GLOBAL_PROJECT_ID = "__global__"
 
 # 篇章参考文档固定文件名（每篇一个，AI 生成章后写入）
 ARTICLE_REF_FILENAME = "篇章参考"
+
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
@@ -106,7 +110,7 @@ def _index_doc_silent(db: Session, o: ReferenceDocORM) -> None:
         vector_index.index_reference_doc(db, o)
         db.commit()
     except Exception as e:  # noqa: BLE001
-        print(f"[reference_crud] 向量索引跳过: {type(e).__name__}: {str(e)[:80]}")
+        logger.warning(f"[reference_crud] 向量索引跳过: {type(e).__name__}: {str(e)[:80]}")
 
 
 def get_reference(db: Session, project_id: str, doc_id: str) -> ReferenceDoc | None:
@@ -577,7 +581,7 @@ def pick_relevant(
             q = q.filter(ReferenceDocORM.article_id.is_(None))
         rows = q.all()
     except Exception as e:  # noqa: BLE001
-        print(f"[reference_crud.pick_relevant] 查询失败: {e}")
+        logger.warning(f"[reference_crud.pick_relevant] 查询失败: {e}")
         return "", []
 
     if not rows:
@@ -609,7 +613,7 @@ def pick_relevant(
         for i, sid in enumerate(sorted(vec_top, key=lambda k: -vec_top[k]), 1):
             vec_rank[sid] = i
     except Exception as e:  # noqa: BLE001
-        print(f"[reference_crud.pick_relevant] 向量通道跳过: {type(e).__name__}: {str(e)[:80]}")
+        logger.warning(f"[reference_crud.pick_relevant] 向量通道跳过: {type(e).__name__}: {str(e)[:80]}")
 
     # ---- RRF 融合 ----
     _RRF_K = 60
@@ -641,7 +645,7 @@ def pick_relevant(
             # rerank 返回完整的候选序；取前 top_k（分数为 0 的仍保留，交由 RRF 序兜底）
             picked = ranked[: max(0, top_k)]
         except Exception as e:  # noqa: BLE001
-            print(f"[reference_crud.pick_relevant] rerank 跳过: {type(e).__name__}: {str(e)[:80]}")
+            logger.warning(f"[reference_crud.pick_relevant] rerank 跳过: {type(e).__name__}: {str(e)[:80]}")
             picked = candidates[: max(0, top_k)]
     else:
         picked = candidates[: max(0, top_k)]
@@ -718,7 +722,7 @@ def recommend_global_references(
         }
         pool = db.query(ReferenceDocORM).filter_by(project_id=GLOBAL_PROJECT_ID).all()
     except Exception as e:  # noqa: BLE001
-        print(f"[reference_crud.recommend_global_references] 失败: {e}")
+        logger.warning(f"[reference_crud.recommend_global_references] 失败: {e}")
         return []
 
     out = []

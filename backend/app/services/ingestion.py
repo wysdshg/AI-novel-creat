@@ -10,6 +10,7 @@
 所以准备了规则兜底：正文首尾截取 + 已登记实体子串匹配，
 质量不如模型抽取，但保证「记忆链不断」。
 """
+import logging
 import json
 import re
 from typing import Any
@@ -56,6 +57,9 @@ _JSON_KEYS = (
 # ===========================================================================
 # JSON 抽取容错
 # ===========================================================================
+
+logger = logging.getLogger(__name__)
+
 
 def parse_json_loose(text: str) -> dict | None:
     """从模型输出里把 JSON 抠出来。
@@ -264,7 +268,7 @@ def ingest_chapter(
                 if not extracted.get("summary"):
                     extracted = None  # 摘要都空，等于没抽出来
         except Exception as e:  # noqa: BLE001
-            print(f"[ingestion] 记忆抽取调用失败: {type(e).__name__}: {str(e)[:150]}")
+            logger.warning(f"[ingestion] 记忆抽取调用失败: {type(e).__name__}: {str(e)[:150]}")
 
     used_fallback = extracted is None
     if used_fallback:
@@ -289,7 +293,7 @@ def ingest_chapter(
         result["new_entities"] = mem.new_entities or []
         result["next_directions"] = mem.next_directions or []
     except Exception as e:  # noqa: BLE001
-        print(f"[ingestion] 记忆落库失败: {e}")
+        logger.warning(f"[ingestion] 记忆落库失败: {e}")
         result["memory_error"] = str(e)[:200]
 
     # ---------- 3. 篇章摘要写进参考文档（追加，不覆盖） ----------
@@ -308,7 +312,7 @@ def ingest_chapter(
             )
             result["digest_written"] = True
         except Exception as e:  # noqa: BLE001
-            print(f"[ingestion] 写篇章摘要失败: {e}")
+            logger.warning(f"[ingestion] 写篇章摘要失败: {e}")
 
     # ---------- 3.5 向量索引同步（A 线检索升级，失败静默不阻断） ----------
     try:
@@ -317,7 +321,7 @@ def ingest_chapter(
             db, project_id, result.get("memory_id") or "", chapter.article_id)
         result["vector_index"] = vec_stats
     except Exception as e:  # noqa: BLE001
-        print(f"[ingestion] 向量索引同步跳过: {type(e).__name__}: {e}")
+        logger.warning(f"[ingestion] 向量索引同步跳过: {type(e).__name__}: {e}")
 
     # ---------- 4. 走向卡片推送到对话区 ----------
     if push_directions is None:
@@ -343,7 +347,7 @@ def ingest_chapter(
             )
             result["directions_pushed"] = len(dirs)
         except Exception as e:  # noqa: BLE001
-            print(f"[ingestion] 推送走向卡片失败: {e}")
+            logger.warning(f"[ingestion] 推送走向卡片失败: {e}")
 
     # ---------- 5. 阶段压缩 ----------
     try:
@@ -354,7 +358,7 @@ def ingest_chapter(
             if s:
                 result["stage_compressed"] = {"from": rng[0], "to": rng[1]}
     except Exception as e:  # noqa: BLE001
-        print(f"[ingestion] 阶段压缩失败: {e}")
+        logger.warning(f"[ingestion] 阶段压缩失败: {e}")
 
     return result
 
@@ -411,7 +415,7 @@ def _llm_compress_summary(heading: str, child_summaries: list[str], target_words
         text = adapter.chat([{"role": "user", "content": prompt}])
         return _strip_text(text) or None
     except Exception as e:  # noqa: BLE001
-        print(f"[aggregation] LLM 压缩失败({heading}): {type(e).__name__}: {str(e)[:150]}")
+        logger.warning(f"[aggregation] LLM 压缩失败({heading}): {type(e).__name__}: {str(e)[:150]}")
         return None
 
 
@@ -487,7 +491,7 @@ def aggregate_overview(db: Session, project_id: str, article_id: str | None = No
     try:
         db.commit()
     except Exception as e:  # noqa: BLE001
-        print(f"[aggregation] 提交失败: {e}")
+        logger.warning(f"[aggregation] 提交失败: {e}")
         db.rollback()
     return result
 
@@ -544,7 +548,7 @@ def compress_stage(db: Session, project_id: str, from_no: int, to_no: int) -> di
             ])
             data = parse_json_loose(out or "")
         except Exception as e:  # noqa: BLE001
-            print(f"[ingestion.compress_stage] 模型调用失败: {str(e)[:150]}")
+            logger.warning(f"[ingestion.compress_stage] 模型调用失败: {str(e)[:150]}")
 
     if not data or not str(data.get("summary") or "").strip():
         # 兜底：直接把各章摘要串起来截断，信息密度低但不丢链

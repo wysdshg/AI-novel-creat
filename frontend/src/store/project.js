@@ -236,15 +236,9 @@ export const useProjectStore = defineStore('project', {
       if (this.sendingDiscussion) return
       if (!userText || !userText.trim()) return
 
-      console.group('📤 [Store] sendDiscussion 调用')
-      console.log('用户输入:', userText)
-      console.log('当前小说ID:', this.currentNovelId)
-      console.log('当前章节ID:', this.currentChapterId)
-      console.log('当前会话ID:', this.currentConversationId)
-      console.log('当前模型ID:', this.currentModelId)
-      console.log('enableThinking:', enableThinking)
-      console.log('当前消息数(发送前):', this.discussionMessages.length)
-      console.groupEnd()
+      // 注意：此处曾有 console.group/console.log 打印用户输入全文与小说/章节/会话/模型 ID。
+      // 属隐私泄漏（浏览器控制台、错误上报工具都会拿到），已移除（问题 1.1）。排查问题时
+      // 请用「消息条数 / 是否全局模式」这类无内容信息，或临时加日志并在提交前删掉。
 
       // === 全局模式（未选小说且未选章节）→ 走全局对话端点 ===
       // ★ 收紧条件：有 chapterId 但无 novelId 是异常状态（不应走全局）
@@ -304,14 +298,8 @@ export const useProjectStore = defineStore('project', {
       // 章级上下文 → conversation_id 传 null（走章线程）；小说级 → 传当前会话 id
       const conversationId = this.currentChapterId ? null : (this.currentConversationId || null)
 
-      console.group('📤 [Store] 小说模式 — 构建请求体')
-      console.log('history 条数:', history.length)
-      history.forEach((m, i) => {
-        const preview = (m.content || '').slice(0, 120)
-        console.log(`  [${i}] ${m.role}: ${preview}${m.content?.length > 120 ? '...' : ''}`)
-      })
-      console.log('conversationId:', conversationId)
-      console.groupEnd()
+      // 注意：此处曾有 console.group 逐条打印 history 正文前 120 字 + conversationId。
+      // 属隐私泄漏，已移除（问题 1.1）。
 
       this.sendingDiscussion = true
       try {

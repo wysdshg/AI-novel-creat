@@ -9,12 +9,16 @@ siliconflow（硅基流动）/ nvidia（英伟达 NIM）/ zhipu（智谱 GLM）�
 - chat() 同步返回完整文本；stream() 同步生成器逐段 yield（供章节生成 SSE 使用）；
   astream() 异步包装 stream() 以满足抽象基类接口。
 """
+import logging
 import json
 import re
 import urllib.request
 import urllib.error
 
 from app.core.gateway.base import BaseModelAdapter
+
+
+logger = logging.getLogger(__name__)
 
 
 def _build_request(url: str, payload: dict, api_key: str) -> urllib.request.Request:
@@ -133,10 +137,10 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
                 if not isinstance(s, str):
                     s = str(s)
                 return s if len(s) <= n else s[:n] + f"…(共{len(s)}字)"
-            print("\n===== [DEBUG] LLM 请求体 =====", flush=True)
-            print(f"  vendor={vendor!r} model={self.config.get('model_name')!r} stream={payload.get('stream')}", flush=True)
-            print(f"  url={(self.config.get('api_base','') or '').rstrip('/')}/chat/completions", flush=True)
-            print(f"  messages 条数={len(messages)}", flush=True)
+            logger.info("\n===== [DEBUG] LLM 请求体 =====")
+            logger.info(f"  vendor={vendor!r} model={self.config.get('model_name')!r} stream={payload.get('stream')}")
+            logger.info(f"  url={(self.config.get('api_base','') or '').rstrip('/')}/chat/completions")
+            logger.info(f"  messages 条数={len(messages)}")
             for i, m in enumerate(messages):
                 role = m.get("role")
                 c = m.get("content", "")
@@ -144,10 +148,10 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
                     c = str(c)
                 # system 提示词（可能上万字）不截断，便于排查；其余消息截断到 300 字
                 limit = 20000 if role == "system" else 300
-                print(f"  [{i}] {role}: {_cut(c, limit)}", flush=True)
+                logger.info(f"  [{i}] {role}: {_cut(c, limit)}")
             extra = {k: v for k, v in payload.items() if k not in ("model", "messages", "stream")}
-            print(f"  其他参数={extra}", flush=True)
-            print("===== [DEBUG] END =====\n", flush=True)
+            logger.info(f"  其他参数={extra}")
+            logger.info("===== [DEBUG] END =====\n")
         except Exception:
             pass
 
@@ -180,7 +184,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
                 if val:
                     return val
             # 都没有：打印响应体片段便于排查，然后返回空
-            print(f"[openai_compat.chat] 返回为空: model={self.config.get('model_name')!r} body={body[:1000]!r}", flush=True)
+            logger.info(f"[openai_compat.chat] 返回为空: model={self.config.get('model_name')!r} body={body[:1000]!r}")
             return ""
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"解析模型响应失败: {body[:300]}") from e
@@ -226,10 +230,9 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
                 # 英文占比 >15% 时拒绝兜底（与 stream_with_thinking 同款防线）
                 english_tokens = re.findall(r"[A-Za-z]{3,}", fallback)
                 if len("".join(english_tokens)) > len(fallback) * 0.15:
-                    print(
+                    logger.info(
                         "[openai_compat.stream] 正文为空且 reasoning 主要为英文分析，"
                         f"疑似 thinking 泄漏，拒绝兜底输出。model={self.config.get('model_name')!r}",
-                        flush=True,
                     )
                     yield "\n[生成异常：模型仅返回思考分析，未输出正文。请尝试关闭思考模式或更换模型。]"
                 else:
@@ -252,10 +255,6 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         base = (self.config.get("api_base", "") or "").rstrip("/")
         url = f"{base}/chat/completions"
         req = _build_request(url, payload, self.config.get("api_key", ""))
-        # 调试日志：捕获原始 SSE 帧，用于排查 content/reasoning 字段分布
-        _raw_log_path = r"E:\AI小说创作\backend\glm_sse_raw.log"
-        _raw_log = open(_raw_log_path, "w", encoding="utf-8")
-        _frame_idx = 0
         # 兜底：某些模型（如 NVIDIA NIM 的 GLM-5.2）在流式下会把正文也塞进 reasoning_content，
         # content 始终为空。此时必须把 reasoning 也作为正文输出，否则前端正文区域空白。
         _reasoning_buffer = []
@@ -264,29 +263,16 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             with urllib.request.urlopen(req, timeout=240) as resp:
                 for raw in resp:
                     line = raw.decode("utf-8").strip()
-                    _frame_idx += 1
                     if not line or not line.startswith("data:"):
                         continue
                     data = line[len("data:"):].strip()
                     if data == "[DONE]":
-                        _raw_log.write(f"[{_frame_idx}] DONE\n")
                         break
                     try:
                         obj = json.loads(data)
                         delta = obj["choices"][0]["delta"]
                         reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
                         piece = delta.get("content") or ""
-                        # 只记录前 20 帧、content 非空帧、最后 5 帧，避免日志爆炸
-                        if _frame_idx <= 20 or piece or (_frame_idx % 50 == 0):
-                            _raw_log.write(
-                                f"[{_frame_idx}] reasoning_len={len(reasoning)} content_len={len(piece)} "
-                                f"reasoning_keys={list(delta.keys())}\n"
-                            )
-                            if piece:
-                                _raw_log.write(f"  CONTENT_SAMPLE: {piece[:120]!r}\n")
-                            if reasoning:
-                                _raw_log.write(f"  REASONING_SAMPLE: {reasoning[:120]!r}\n")
-                            _raw_log.flush()
                         if reasoning:
                             _reasoning_buffer.append(reasoning)
                             yield ("thinking", reasoning)
@@ -301,7 +287,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
                 fallback_content = "".join(_reasoning_buffer)
                 english_tokens = re.findall(r"[A-Za-z]{3,}", fallback_content)
                 if len("".join(english_tokens)) > len(fallback_content) * 0.15:
-                    print(
+                    logger.info(
                         "[openai_compat.stream_with_thinking] 正文为空且 reasoning 主要为英文分析，"
                         f"疑似 thinking 泄漏，拒绝兜底输出。model={self.config.get('model_name')!r}"
                     )
@@ -313,12 +299,6 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             yield ("content", f"\n[模型调用失败 status={e.code}: {detail[:200]}]")
         except Exception as e:  # noqa: BLE001
             yield ("content", f"\n[模型调用异常: {str(e)[:200]}]")
-        finally:
-            try:
-                _raw_log.write(f"\n[TOTAL_FRAMES] {_frame_idx}\n")
-                _raw_log.close()
-            except Exception:  # noqa: BLE001
-                pass
 
     async def astream(self, messages, **params):
         for chunk in self.stream(messages, **params):

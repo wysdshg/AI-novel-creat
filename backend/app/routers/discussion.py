@@ -6,6 +6,7 @@
 - POST   /discussion/archive    将当前草稿归档为指定章节备注并移出缓存
 - POST   /discussion/chat       流式调用默认模型，结束后再把「用户提问 + AI 回复」落库
 """
+import logging
 import json
 import re
 from typing import Optional
@@ -32,6 +33,9 @@ from app.services import reference_crud as ref_svc
 from app.services.reference_crud import GLOBAL_PROJECT_ID
 from app.services.reference_selector import get_reference_selector
 from app.services import load_observation as load_obs
+
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_model(db: Session, model_id: Optional[str] = None):
@@ -333,17 +337,15 @@ def chat(
             "enable_thinking": default.enable_thinking,
         }
 
-    # ▼▼▼ 请求日志（调试用，前端发什么后端收什么）▼▼▼
-    print("=" * 60)
-    print(f"[discussion/chat] 收到请求 project_id={project_id} chapter_id={chapter_id}")
-    print(f"  请求体 model_id={body.model_id} enable_thinking={body.enable_thinking} conversation_id={body.conversation_id}")
-    print(f"  消息条数={len(body.messages)}")
-    for i, m in enumerate(body.messages):
-        role = (m or {}).get("role", "?")
-        content = (m or {}).get("content", "") or ""
-        print(f"    [{i}] {role}: {content[:160]}{'...' if len(content) > 160 else ''}")
-    print(f"  use_model={use_model} default_model={default.model_name if default else None}")
-    print("=" * 60)
+    # ▼▼▼ 请求日志（仅无内容元信息）▼▼▼
+    # ⚠️ 曾逐条打印 messages 正文前 160 字 —— 用户输入/作品内容进服务端日志，
+    # 属隐私泄漏，已移除（问题 1.1）。排查只保留「条数 / 角色序列」这类无内容信息。
+    logger.info("=" * 60)
+    logger.info(f"[discussion/chat] 收到请求 project_id={project_id} chapter_id={chapter_id}")
+    logger.info(f"  请求体 model_id={body.model_id} enable_thinking={body.enable_thinking} conversation_id={body.conversation_id}")
+    logger.info(f"  消息条数={len(body.messages)} 角色序列={[ (m or {}).get('role', '?') for m in body.messages ]}")
+    logger.info(f"  use_model={use_model} default_model={default.model_name if default else None}")
+    logger.info("=" * 60)
     # ▲▲▲ 请求日志结束 ▲▲▲
 
     # 取最近一条 user 消息，用于持久化
@@ -396,7 +398,7 @@ def chat(
             )
             yield f"event: context\ndata: {json.dumps(ctx_meta, ensure_ascii=False)}\n\n"
         except Exception as e:  # noqa: BLE001
-            print(f"[discussion/chat] 上下文组装失败，降级: {e}")
+            logger.warning(f"[discussion/chat] 上下文组装失败，降级: {e}")
             sys_prompt = _SYS_PROMPT + _collect_skill_blocks(gen_db)
 
         # 按需加载目录：把「可用参考文件清单」作为稳定前缀挂到 system（配合 Ollama cache_prompt 缓存，
@@ -424,7 +426,7 @@ def chat(
                     "若不需要任何参考资料或设定，直接正常回答即可。\n"
                 )
         except Exception as e:  # noqa: BLE001
-            print(f"[discussion/chat] 目录构造失败，跳过: {e}")
+            logger.warning(f"[discussion/chat] 目录构造失败，跳过: {e}")
 
         messages = [{"role": "system", "content": sys_prompt}]
         for m in body.messages:
@@ -454,7 +456,7 @@ def chat(
         assistant_thinking: list[str] = []
         try:
             adapter = get_adapter(model_cfg["vendor"], config)
-            print(f'[discussion] 模型={model_cfg["model_name"]} ({model_cfg["vendor"]}) | api_base={(model_cfg["api_base"] or "")[:50]} | thinking={want_thinking}')
+            logger.info(f'[discussion] 模型={model_cfg["model_name"]} ({model_cfg["vendor"]}) | api_base={(model_cfg["api_base"] or "")[:50]} | thinking={want_thinking}')
 
             # ---- 按需参考加载（两阶段）----
             # Pass1：非流式、think=false，让模型决定是否需要参考文件（输出 LOAD_REFS:<ids>）或直接作答。
@@ -464,7 +466,7 @@ def chat(
                 try:
                     first_text = adapter.chat(messages, temperature=temperature, enable_thinking=want_thinking)
                 except Exception as e:  # noqa: BLE001
-                    print(f"[discussion/chat] Pass1 失败，降级单次流式: {e}")
+                    logger.warning(f"[discussion/chat] Pass1 失败，降级单次流式: {e}")
                     first_text = ""
 
             selected_ids = ref_selector.select(first_text) if first_text else None
@@ -553,7 +555,7 @@ def chat(
                         conversation_id=conv_id,
                     )
             except Exception as e:  # noqa: BLE001
-                print(f"[discussion/chat] 持久化失败: {e}")
+                logger.warning(f"[discussion/chat] 持久化失败: {e}")
             # 抽取对话中建议的新实体，推送给前端供作者确认写入资料库
             # 复用用户本轮对话选择的模型（default 即 _resolve_model 解析结果），不固定 Ollama/默认
             try:
@@ -564,7 +566,7 @@ def chat(
                 if suggestion:
                     yield "event: entity_suggestion\ndata: " + json.dumps(suggestion, ensure_ascii=False) + "\n\n"
             except Exception as e:  # noqa: BLE001
-                print(f"[discussion/chat] 实体建议抽取失败: {e}")
+                logger.warning(f"[discussion/chat] 实体建议抽取失败: {e}")
             # P0 观测落库（记录本轮设定/参考加载情况，失败静默）
             try:
                 load_obs.record(
@@ -577,7 +579,7 @@ def chat(
                     **obs,
                 )
             except Exception as e:  # noqa: BLE001
-                print(f"[discussion/chat] 观测落库失败: {e}")
+                logger.warning(f"[discussion/chat] 观测落库失败: {e}")
             # 关闭流式生成器自建的 session（finally 保证正常/异常都释放）
             gen_db.close()
 
@@ -630,7 +632,7 @@ def _build_global_system(db: Session) -> str:
         if setting_catalog:
             parts.append(setting_catalog)
     except Exception as e:  # noqa: BLE001
-        print(f"[discussion/global-chat] 设定目录构造失败，跳过: {e}")
+        logger.warning(f"[discussion/global-chat] 设定目录构造失败，跳过: {e}")
 
     # 注入全局 SKILL
     skill_block = _collect_skill_blocks(db)
@@ -711,7 +713,7 @@ def global_chat(
             ctx_meta = {"mode": "global", "global_chat": True}
             yield f"event: context\ndata: {json.dumps(ctx_meta, ensure_ascii=False)}\n\n"
         except Exception as e:
-            print(f"[discussion/global-chat] 上下文组装失败，降级: {e}")
+            logger.warning(f"[discussion/global-chat] 上下文组装失败，降级: {e}")
             sys_prompt = _SYS_PROMPT + _collect_skill_blocks(db)
 
         # 全局参考文档目录（可选注入）
@@ -732,7 +734,7 @@ def global_chat(
                     "若不需要任何参考资料或设定，直接正常回答即可。\n"
                 )
         except Exception as e:
-            print(f"[discussion/global-chat] 目录构造失败，跳过: {e}")
+            logger.warning(f"[discussion/global-chat] 目录构造失败，跳过: {e}")
 
         # 历史裁剪：system prompt 已占约 6k 字符。全局对话现在有记忆（落库后每轮都会
         # 带上完整历史），若不限长，连续对话很快顶爆模型上下文窗口 —— 而 Ollama 超窗
@@ -772,14 +774,14 @@ def global_chat(
         assistant_thinking: list[str] = []
         try:
             adapter = get_adapter(model_cfg["vendor"], config)
-            print(f'[discussion] 模型={model_cfg["model_name"]} ({model_cfg["vendor"]}) | api_base={(model_cfg["api_base"] or "")[:50]} | thinking={want_thinking}')
+            logger.info(f'[discussion] 模型={model_cfg["model_name"]} ({model_cfg["vendor"]}) | api_base={(model_cfg["api_base"] or "")[:50]} | thinking={want_thinking}')
 
             first_text = ""
             if hasattr(adapter, "chat"):
                 try:
                     first_text = adapter.chat(messages, temperature=temperature, enable_thinking=want_thinking)
                 except Exception as e:
-                    print(f"[discussion/global-chat] Pass1 失败，降级单次流式: {e}")
+                    logger.warning(f"[discussion/global-chat] Pass1 失败，降级单次流式: {e}")
                     first_text = ""
 
             selected_ids = ref_selector.select(first_text) if first_text else None
@@ -862,7 +864,7 @@ def global_chat(
                         conversation_id=body.conversation_id,
                     )
             except Exception as e:  # noqa: BLE001
-                print(f"[discussion/global-chat] 持久化失败: {e}")
+                logger.warning(f"[discussion/global-chat] 持久化失败: {e}")
             # P0 观测落库（记录本轮设定/参考加载情况，失败静默）
             try:
                 load_obs.record(
@@ -873,7 +875,7 @@ def global_chat(
                     **obs,
                 )
             except Exception as e:  # noqa: BLE001
-                print(f"[discussion/global-chat] 观测落库失败: {e}")
+                logger.warning(f"[discussion/global-chat] 观测落库失败: {e}")
             # 关闭流式生成器自建的 session（finally 保证正常/异常都释放）
             gen_db.close()
 

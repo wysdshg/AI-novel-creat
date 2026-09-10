@@ -8,6 +8,7 @@
 本模块只做一件事：把观测数据落库 + 提供查询。任何异常只打印、不抛出——
 观测绝不能阻断对话主流程（对用户零感知）。
 """
+import logging
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -15,6 +16,9 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.models.orm import DiscussionLoadLogORM
+
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> datetime:
@@ -58,7 +62,7 @@ def record(
         db.add(o)
         db.commit()
     except Exception as e:  # noqa: BLE001
-        print(f"[load_observation] 落库失败（忽略）: {e}")
+        logger.warning(f"[load_observation] 落库失败（忽略）: {e}")
         try:
             db.rollback()
         except Exception:  # noqa: BLE001

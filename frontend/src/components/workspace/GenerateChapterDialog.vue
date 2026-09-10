@@ -237,6 +237,8 @@ const genSeq = ref(0)
 const stopController = ref(null)
 const stopped = ref(false)      // 手动停止（保留已生成内容，但未落库）
 const stopReason = ref('')      // 后端复读检测截断等提示
+const genError = ref('')        // 后端 error 事件：本轮未产出正文（如模型调用失败）
+const savedOk = ref(false)      // 本轮是否收到 saved（=正文真的落库了）
 // 走向建议由后台摄取异步落库，关闭弹窗后轻量延时刷新把它显示出来（问题2 可见化）
 const ingestRefreshTimers = []
 const clearIngestTimers = () => {
@@ -356,6 +358,8 @@ const onGenerate = async () => {
   thinkingActive.value = false
   stopped.value = false
   stopReason.value = ''
+  genError.value = ''
+  savedOk.value = false
   result.value = false
   wordCount.value = 0
   ctx.value = null
@@ -419,11 +423,20 @@ const onGenerate = async () => {
       } else if (event === 'saved') {
         wordCount.value = data.word_count || streamText.value.length
         lastChapterId.value = data?.chapter_id || lastChapterId.value
+        savedOk.value = true
         result.value = true
         generating.value = false // done 即完成：摄取已在后台，无需等流关闭
+      } else if (event === 'error') {
+        // 后端拦住「错误提示落库」时发来的原因（如模型调用失败、未配置模型）
+        genError.value = data?.message || '生成失败'
       }
     }, { signal: stopController.value.signal, modelId: store.currentModelId })
     if (mySeq !== genSeq.value) return
+    // 未产出正文（无 saved）→ 不进结果页，留在表单让作者直接重试并说明原因
+    if (genError.value && !savedOk.value) {
+      ElMessage.error(genError.value)
+      return
+    }
     result.value = true
     // 4 级结构：生成后刷新侧栏树，让新章出现在对应篇下
     try {
@@ -449,7 +462,12 @@ const onGenerate = async () => {
         }, ms),
       )
     }
-    ElMessage.success('章节生成完成')
+    if (genError.value) {
+      // 有正文落库但过程中报过错（如模型中途失败）——别报"完成"，如实提示
+      ElMessage.warning('生成结束但有异常：' + genError.value)
+    } else {
+      ElMessage.success('章节生成完成')
+    }
   } catch (e) {
     if (mySeq !== genSeq.value) return
     if (e?.name === 'GenerationStopped') {

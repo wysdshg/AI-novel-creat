@@ -126,15 +126,18 @@ def quality_metrics(text):
     }
 
 
-def judge(m, humanize_score, repetition_stopped):
+def judge(m, humanize_score, repetition_stopped, target_words=None):
+    """判定质量。target_words 给定时，字数下限按目标值等比折算（而不是用固定 1800）——
+    否则传 `--target-words 1500` 时正文 1463 字明明是达标范围内，却会被判失败（假警报）。"""
     checks, fails, warns = [], [], []
+    min_chars = int(target_words * 0.72) if target_words else TH["min_chars"]
 
     def ck(name, ok, detail, level="fail"):
         checks.append((name, ok, detail, level))
         if not ok:
             (fails if level == "fail" else warns).append(f"{name}（{detail}）")
 
-    ck("字数达标", m["chars"] >= TH["min_chars"], f"{m['chars']} 字，阈值 ≥{TH['min_chars']}")
+    ck("字数达标", m["chars"] >= min_chars, f"{m['chars']} 字，阈值 ≥{min_chars}")
     ck("标点密度正常", TH["punct_lo"] <= m["punct_density"] <= TH["punct_hi"],
        f"{m['punct_density']}，正常区间 [{TH['punct_lo']},{TH['punct_hi']}]")
     ck("最长无标点段", m["max_no_punct_len"] <= TH["max_no_punct"],
@@ -297,7 +300,8 @@ def main():
     except Exception as e:
         print(f"  去AI味扫描跳过（{e}）")
 
-    checks, fails, warns = judge(m, humanize_score, stopped is not None)
+    checks, fails, warns = judge(m, humanize_score, stopped is not None,
+                                 target_words=args.target_words)
     print("  --- 判定 ---")
     for name, ok, detail, level in checks:
         mark = "✅" if ok else ("⚠️" if level == "warn" else "❌")

@@ -8,6 +8,7 @@
 这是长篇的通行折中——全量注入所有角色到第 50 章就装不下了，
 但只注入主角又会让配角人设漂移。
 """
+import logging
 import os
 from sqlalchemy.orm import Session
 
@@ -27,12 +28,15 @@ from app.models.orm import (
 PREV_TAIL_CHARS = 600
 
 
+logger = logging.getLogger(__name__)
+
+
 def _safe(fn, default=None):
     """查询容错包装：单层失败不影响其它层。"""
     try:
         return fn()
     except Exception as e:  # noqa: BLE001
-        print(f"[context.layers] 层提取失败，已跳过: {type(e).__name__}: {str(e)[:120]}")
+        logger.warning(f"[context.layers] 层提取失败，已跳过: {type(e).__name__}: {str(e)[:120]}")
         return default
 
 

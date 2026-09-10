@@ -17,7 +17,7 @@ backend/tests/
 │   ├── probe_pipeline.py     内部管线探针（假模型适配器 + 临时 DB，不碰真实数据）
 │   ├── probe_glm_ms.py       魔搭 GLM 原始 SSE 帧探测（换新模型时先跑这个，key 走环境变量）
 │   └── smoke_startup.py      启动冒烟（路由装配 + 建表 + SKILL 安装）
-├── unit/                ← pytest 单元测试（2026-09-10：90 用例全绿 ~7s）
+├── unit/                ← pytest 单元测试（2026-09-10：104 用例全绿 ~7s）
 │   ├── test_dedup.py         去重反误杀回归（fixtures/ 内 3 份真实轮次文本）
 │   ├── test_humanizer.py     去AI味打分回归
 │   ├── test_smoke.py         路由装配冒烟（import main，零 DB 副作用）
@@ -25,10 +25,12 @@ backend/tests/
 │   ├── test_sse_stream.py    SSE 帧契约 + close 传播 + RepetitionGuard 双层检测
 │   ├── test_ingestion_json.py   parse_json_loose 容错（围栏/废话/尾逗号/全角引号）
 │   ├── test_cascade_delete.py   级联删除 0 残留（含摄取 fallback 降级路径）
-│   ├── test_vector_store.py   向量存储双实现契约（upsert/KNN/隔离/幂等/删除/排序一致）
+│   ├── test_vector_store.py   向量存储双实现契约 + 全局表元数据过滤 + 竞态守卫
 │   ├── test_pick_hybrid.py    关键词+向量 RRF 融合 + 参考文档向量生命周期钩子
 │   ├── test_rerank.py         rerank 客户端 + 集成（重排生效/失败降级/候选不足跳过）
 │   ├── test_entity_graph.py   实体图一跳扩展（关系双向/势力归属/掌门/关联地点/上限）
+│   ├── test_chapter_persist_guard.py      1.2 纯函数：正文为空则禁落库
+│   ├── test_chapter_failure_no_persist.py 1.2 集成：真实驱动 SSE 生成器，模型失败不建章/不覆盖
 │   └── fixtures/             ← 测试素材（真实章节文本，勿改）
 └── reports/             ← 测试报告输出（test_full_chain.py 自动写入，可删）
 ```
@@ -56,7 +58,7 @@ backend/tests/
 | 场景 | 跑什么 |
 |---|---|
 | 改了去重 / humanizer / 任何纯函数逻辑 | `pytest tests/unit/`（秒级，必跑） |
-| 改完任何后端代码提交前 | `pytest tests/unit/`（90 用例 ~7s） |
+| 改完任何后端代码提交前 | `pytest tests/unit/`（104 用例 ~7s） |
 | 改了生成链路 / prompt / 解码参数 | `test_full_chain.py`（必跑，看质量指标） |
 | 改了检索（向量/关键词/RRF/rerank/实体图） | `test_retrieval_chain.py`（看 context 事件注入了什么） |
 | 改了按需加载（LOAD_REFS/LOAD_SETTING/目录/两阶段） | `test_on_demand_load.py`（看 refs 事件与答案是否真来自资料） |

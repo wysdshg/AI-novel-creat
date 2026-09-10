@@ -18,6 +18,9 @@ frontend/.buildcheck/
 # ---- 工具数据 ----
 .workbuddy/
 
+# ---- e2e 产物（每次跑都会变，可再生；要留基线请复制到 docs/baselines/ 并改固定名）----
+backend/tests/reports/
+
 # ---- 日志 ----
 *.log
 

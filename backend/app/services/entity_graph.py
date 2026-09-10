@@ -21,6 +21,7 @@
 - **确定性排序**：关系强度降序 + 名称，保证同输入同输出（可测试）；
 - **可关**：app_config `retrieval.graph_expand`（默认开）。
 """
+import logging
 from sqlalchemy.orm import Session
 
 from app.models.orm import CharacterORM, FactionORM, LocationORM, RelationORM
@@ -32,6 +33,9 @@ KEY_GRAPH_EXPAND = "retrieval.graph_expand"
 MAX_EXTRA_CHARS = 10
 MAX_EXTRA_FACTIONS = 8
 MAX_EXTRA_LOCATIONS = 8
+
+
+logger = logging.getLogger(__name__)
 
 
 def enabled(db: Session) -> bool:
@@ -75,7 +79,7 @@ def expand(
         locations = db.query(LocationORM).filter_by(project_id=project_id).all()
         relations = db.query(RelationORM).filter_by(project_id=project_id).all()
     except Exception as e:  # noqa: BLE001
-        print(f"[entity_graph] 读表失败，跳过扩展: {type(e).__name__}: {e}")
+        logger.warning(f"[entity_graph] 读表失败，跳过扩展: {type(e).__name__}: {e}")
         return out, {"enabled": True, "error": f"{type(e).__name__}: {str(e)[:80]}",
                      "added": trace["added"]}
 

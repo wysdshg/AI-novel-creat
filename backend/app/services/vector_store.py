@@ -13,6 +13,7 @@
 向量约定：全部 L2 归一化（embedding_client 已做，本模块防御性再归一），
 归一化后 L2 距离与余弦相似度单调等价。事务：实现内不 commit，由调用方统一提交。
 """
+import logging
 import json
 import math
 from dataclasses import dataclass
@@ -25,6 +26,9 @@ from app.models.orm import VectorChunkORM
 
 VEC_TABLE = "vec_index"
 EMBED_DIM = 1024
+
+
+logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -237,7 +241,7 @@ def remove_project_index(db: Session, project_id: str) -> int:
         conn.exec_driver_sql("DELETE FROM vector_chunks WHERE project_id = ?", (project_id,))
         return len(ids)
     except Exception as e:  # noqa: BLE001
-        print(f"[vector_store] 清理项目向量失败: {type(e).__name__}: {str(e)[:80]}")
+        logger.warning(f"[vector_store] 清理项目向量失败: {type(e).__name__}: {str(e)[:80]}")
         return 0
 
 
@@ -271,7 +275,7 @@ def rebuild_vec_index(db: Session) -> int:
             n += 1
         return n
     except Exception as e:  # noqa: BLE001
-        print(f"[vector_store] 重建 vec_index 失败: {type(e).__name__}: {str(e)[:80]}")
+        logger.warning(f"[vector_store] 重建 vec_index 失败: {type(e).__name__}: {str(e)[:80]}")
         return 0
 
 
