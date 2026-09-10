@@ -6,6 +6,7 @@
 ---
 
 ## 2026-09-10
+- **⚠️ 事故与恢复：沙箱内 `git rebase` 破坏 `.git`（记入 04-A7）**。推送 B 线提交时被拒（远程有用户 13:56 在 GitHub 网页上改的 README 提交 `33c5656`），随后执行 `git rebase` 报 `could not mark as interactive`，`.git/refs/` 目录被抹掉、刚提交的 `d519666` 与新 fetch 的对象一并丢失，git 报 `not a git repository`。**恢复**：备份 `.git` → 重建 `refs/` 目录（git 立刻恢复识别）→ 确认 pack 历史断在 `878ff45` → 以远端为准重建本地仓库（`mv .git .git.corrupt` → `git init` → `fetch` → `update-ref main` → `reset --mixed`）→ 工作区变更完好，重新提交为 `c395a2f` 并推送。**工作区文件全程未受影响**（沙箱只搞 `.git`）。教训已写入 04-A7：沙箱里禁用 `git rebase`、动手前先 `cp -r .git`、push 前先 `ls-remote` 对表、保持随时 push。
 - **B 线工程卫生五项完成（0.2 / 1.1 / 1.2 / B4 / 2.6）**——用户拍板按「1.2 → 1.1 → B4 → B2 → B3」顺序开工，孤儿数据选「清掉」。
   - **1.2 错误提示不得落库成正文**（复核确认仍是活 bug）：新增纯函数 `_can_persist(full, error_notes)`；错误/占位文案改存 `error_notes` 只推前端展示，不再进 `content_parts`；正文为空则不落库、只发 `error` 事件（不发 `saved`）。**顺带修掉一个隐蔽的数据丢失**——原先「重新生成」失败时会把已有章节正文整段覆盖成错误提示。前端补 `error` 事件处理（不误报"生成完成"，留在表单可直接重试）。测试 8（纯函数）+ 2（**真实驱动 SSE 生成器**：必抛异常的假适配器 → 不建章 / 不覆盖原稿）。
   - **1.1 隐私日志清理**（实测残留比记录更多，共 5 处）：后端 `discussion.py` 逐条打印 messages 正文前 160 字（原记录误以为只打"条数"）、`assist.py` 打印模型原始返回前 1000 字；前端 `store/project.js` 两处（用户输入全文 + 各 ID、history 逐条正文前 120 字）、`api/discussion.js` 两处（完整 Body + 最后一条消息 + system prompt）；gateway 调试落盘（见 C11）。保留 `console.error` 类无内容诊断。
