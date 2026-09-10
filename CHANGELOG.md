@@ -6,6 +6,18 @@
 ---
 
 ## 2026-09-10
+- **后端日志落盘 + 崩溃取证（让「运行着运行着就挂了」可追溯）**：
+  - **背景**：后端反复「运行着运行着就挂了」，事后**完全无法追溯**——原先日志只输出到控制台，终端窗口一关证据就没了；项目里那几个 `.log` 全是 8 月的旧文件。本次彻查该问题时，连"是崩溃还是被杀"都判断不了，只能靠排除法。故补上落盘。
+  - **落盘**：`backend/logs/backend.log`（INFO+，5MB×5 轮转）+ `error.log`（WARNING+，2MB×3），UTF-8。**启动方式完全不用改**——只要走 `main.py`（`python dev.py` / `uvicorn main:app` 都一样）自动生效。
+  - **取证四件套**（核心价值）：
+    1. **启动/退出标记** —— ★「有启动、无退出」即说明被**强杀**或硬崩溃（`taskkill /F` 不触发 `atexit`）；成对出现则是优雅退出。**这一条直接回答"是不是被杀"**。
+    2. **未捕获异常钩子**（`sys.excepthook` + `threading.excepthook`）—— 落 CRITICAL + **完整 traceback**。后台线程尤其重要：本项目写后摄取/工作流/SSE 都是线程，这类异常默认只印到 stderr，窗口一关就查无此案。
+    3. **心跳**（默认 5 分钟，含 `RSS=` 内存与线程数）—— 最后一条心跳即**进程确切死亡时间**；内存持续上涨可确诊泄漏（"越跑越卡最后挂掉"多半是这类）。可用 `NA_HEARTBEAT_SEC` 调整。
+    4. **uvicorn 三个 logger 单独挂 handler** —— 它们 `propagate=False` 不走 root，否则「哪个请求把它打挂了」的线索全丢。
+  - **踩坑**：`uvicorn.error` 默认 `propagate=True` 会流到父 logger `uvicorn`，两者都挂 handler 会让**同一条日志写两遍**（实测发现）→ 改为动态判断"是否会被祖先 handler 覆盖"，是则跳过。
+  - **踩坑**：新写的 `logging_config.py` 里有 9 处静默 `except`，**被 Phase 3.5 自己写的护栏测试当场抓住**。正确处理不是降低标准，而是**显式豁免日志基础设施**——它的 except 分支不能调 logging（handler 未建好会二次失败、异常 hook 里会递归、退出阶段 handler 可能已 shutdown），豁免登记在 `_EXEMPT_FILES` 并写明理由。
+  - **验证 12 项**：优雅退出有标记 ✓ / **强杀无标记** ✓ / 主线程异常落 traceback ✓ / 后台线程异常落 traceback ✓ / **5 条 uvicorn.access 请求日志落盘** ✓ / 心跳 ✓ / 中文未转义 ✓ / `error.log` 分级正确 ✓ / 日志不重复 ✓。**160 单测全绿**。
+  - **环境变量**：`NA_LOG_DIR`（目录）、`NA_LOG_FILE`（主文件名）、`NA_LOG_LEVEL`、`NA_HEARTBEAT_SEC`。判读方法见 `docs/05-架构与接口.md` §9.2.1。
 - **Phase 3.5 全量 `except Exception` 补齐日志（107 处，消除 53 处「静默吞异常」）**：
   - 用 `ast` 静态扫描 `backend/app/**/*.py`，把 broad-except 分成「已记日志 / 已 re-raise / **吞掉且既无日志也无 raise**」三类。实测 **107 处 broad-except，其中静默 53 处**（原计划估 78 处，实际更多；涉及 23 个文件，其中 10 个连 logger 都没有）。这类站点最要命：功能不工作时**服务端零痕迹**，只能靠用户描述来猜。
   - **按类型分四类处置（不搞一刀切）**：
