@@ -165,6 +165,14 @@ def main():
                     help="显式指定 enable_thinking（默认不传=跟随后端策略）")
     ap.add_argument("--keep", action="store_true", help="保留测试作品不删")
     ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--ingest-level", default="full", choices=["full", "lite", "none"],
+                    help="写后摄取档位：full(全跑) / lite(跳过概览聚合) / none(全跳只验正文)")
+    ap.add_argument("--rounds", type=int, default=1,
+                    help="生成轮数：第 1 轮按 --ingest-level，2~N 轮固定 none（只验文笔稳定性，省调用）")
+    ap.add_argument("--verify-db", action="store_true",
+                    help="跑完断言资料库：章级记忆 / 篇章摘要参考文档 / 实体入库")
+    ap.add_argument("--seed-entities", action="store_true",
+                    help="第 1 轮生成前用一次 /command 请求让 AI 抽四类实体入库（+1 次 LLM 调用）")
     args = ap.parse_args()
 
     base, results, fails_all = args.base_url, [], []
@@ -217,53 +225,114 @@ def main():
     cid = ch["id"]
     print("OK", cid[:8] + "…")
 
-    # ---- S6 生成（SSE） ----
-    print(f"\n[S6] 生成第 1 章（目标 {args.target_words} 字）...")
-    gen_body = {
-        "chapter_no": 1, "title": "第1章 城隍庙的铜牌",
-        "article_id": aid, "chapter_id": cid,
-        "prompt_hint": "主角沈砚在大雨夜躲进城隍庙，遇到一个浑身湿透的孩子，"
-                       "孩子递来一枚刻着奇怪符号的铜牌后消失。",
-        "word_range": {"min": args.target_words - 300, "max": args.target_words + 300},
-        "temperature": 0.4, "from_discussion": False,
-    }
-    if model_id:
-        gen_body["model_id"] = model_id
-    if args.thinking == "on":
-        gen_body["enable_thinking"] = True
-    elif args.thinking == "off":
-        gen_body["enable_thinking"] = False
+    # ---- S5b 实体入库（可选）：一次 /command 让 AI 抽四类实体并全部落库 ----
+    # 这一步补的是此前完全没测的链路：AI 从自然语言 → 结构化实体 → 资料库。
+    # 成本 = 1 次 LLM 调用（adapter.chat，max_tokens=4000），可并入第 1 轮，不额外加轮次。
+    entity_stats = None
+    if args.seed_entities:
+        print("[S5b] 一键实体入库（/command，+1 次 LLM）...", end=" ")
+        try:
+            cmd = unwrap(http(base, "POST", f"/api/v1/projects/{pid}/command", {
+                "text": (
+                    "主角沈砚，太虚剑宗外门弟子，性格沉静、擅长观星；"
+                    "苏清月是他的道侣，出身药王谷；"
+                    "太虚剑宗是正道第一大宗，掌门玄真子；"
+                    "幽冥殿是与之对立的魔道势力，盘踞在忘川谷。"
+                ),
+                "dry_run": False,
+            }, timeout=max(args.timeout, 120)))
+            changes = (cmd or {}).get("changes") or {}
+            entity_stats = {k: len(v or []) for k, v in changes.items()}
+            print(f"OK {entity_stats}")
+        except Exception as e:
+            print(f"FAIL: {e}")
+            entity_stats = {"error": str(e)[:200]}
 
+    # ---- S6 生成（SSE） ----
+    # ---- S6 生成（多轮：第 1 轮按档全跑，2~N 轮只验生成）----
+    # 省调用逻辑：稳定性靠「多轮生成 + 比对文笔指标」，不需要每轮都重跑摄取。
+    # 所以第 1 轮按 --ingest-level（默认 full，验闭环 + 落库断言），
+    # 2~N 轮固定 none（跳过摄取，每轮只 1 次正文调用）。
+    rounds = max(1, args.rounds)
+    round_results = []
     text_parts, events_seen = [], []
     ttfc, saved_info, validate_info, stopped = None, None, None, None
-    gen_start = time.time()
-    resp = http(base, "POST", f"/api/v1/projects/{pid}/chapters/generate",
-                body=gen_body, timeout=args.timeout, stream=True)
-    try:
-        for ev, payload in read_sse(resp):
-            if ev not in ("chunk",):
-                events_seen.append(ev)
-            if ev == "chunk":
-                if ttfc is None:
-                    ttfc = time.time() - gen_start
-                t = payload.get("text", "")
-                text_parts.append(t)
-                sys.stdout.write(".")
-                sys.stdout.flush()
-            elif ev == "stopped":
-                stopped = payload
-            elif ev == "validate":
-                validate_info = payload
-            elif ev == "saved":
-                saved_info = payload
-            elif ev == "done":
-                break
-    finally:
-        resp.close()
-    gen_secs = time.time() - gen_start
-    streamed = "".join(text_parts)
-    print(f"\n  事件序列: {' → '.join(events_seen)}")
-    print(f"  耗时 {gen_secs:.1f}s | 首字 {ttfc:.1f}s" if ttfc else f"\n  耗时 {gen_secs:.1f}s | 无 chunk！")
+    gen_secs = 0.0
+
+    for rnd in range(1, rounds + 1):
+        lvl = args.ingest_level if rnd == 1 else "none"
+        print(f"\n[S6.{rnd}] 生成第 1 章（第 {rnd}/{rounds} 轮，摄取档位={lvl}，目标 {args.target_words} 字）...")
+        gen_body = {
+            "chapter_no": 1, "title": "第1章 城隍庙的铜牌",
+            "article_id": aid, "chapter_id": cid,   # 每轮覆盖同一章，便于比对
+            "prompt_hint": "主角沈砚在大雨夜躲进城隍庙，遇到一个浑身湿透的孩子，"
+                           "孩子递来一枚刻着奇怪符号的铜牌后消失。",
+            "word_range": {"min": args.target_words - 300, "max": args.target_words + 300},
+            "temperature": 0.4, "from_discussion": False,
+            "ingest_level": lvl,
+        }
+        if model_id:
+            gen_body["model_id"] = model_id
+        if args.thinking == "on":
+            gen_body["enable_thinking"] = True
+        elif args.thinking == "off":
+            gen_body["enable_thinking"] = False
+
+        text_parts, events_seen = [], []
+        r_ttfc, r_saved, r_validate, r_stopped = None, None, None, None
+        gen_start = time.time()
+        resp = http(base, "POST", f"/api/v1/projects/{pid}/chapters/generate",
+                    body=gen_body, timeout=args.timeout, stream=True)
+        try:
+            for ev, payload in read_sse(resp):
+                if ev not in ("chunk",):
+                    events_seen.append(ev)
+                if ev == "chunk":
+                    if r_ttfc is None:
+                        r_ttfc = time.time() - gen_start
+                    t = payload.get("text", "")
+                    text_parts.append(t)
+                    sys.stdout.write(".")
+                    sys.stdout.flush()
+                elif ev == "stopped":
+                    r_stopped = payload
+                elif ev == "validate":
+                    r_validate = payload
+                elif ev == "saved":
+                    r_saved = payload
+                elif ev == "done":
+                    break
+        finally:
+            resp.close()
+        r_secs = time.time() - gen_start
+        r_streamed = "".join(text_parts)
+        print(f"\n  事件序列: {' → '.join(events_seen)}")
+        print(f"  耗时 {r_secs:.1f}s | 首字 {r_ttfc:.1f}s" if r_ttfc
+              else f"\n  耗时 {r_secs:.1f}s | 无 chunk！")
+
+        # 只保留最后几轮指标用于汇总；每轮都记录字数与时长，供稳定性比对
+        r_metrics = quality_metrics(r_streamed)
+        round_results.append({
+            "round": rnd, "ingest_level": lvl, "gen_secs": round(r_secs, 1),
+            "ttfc": round(r_ttfc, 1) if r_ttfc else None,
+            "chars": r_metrics["chars"], "max_3gram_repeat": r_metrics["max_3gram_repeat"],
+            "latin_count": r_metrics["latin_count"], "punct_density": r_metrics["punct_density"],
+            "stopped": bool(r_stopped),
+        })
+
+        # 末轮的结果作为后续 S7~S9 的判定依据
+        gen_secs, ttfc, saved_info, validate_info, stopped = r_secs, r_ttfc, r_saved, r_validate, r_stopped
+        streamed = r_streamed
+
+    if rounds > 1:
+        print(f"\n[S6.汇总] {rounds} 轮生成稳定性：")
+        for r in round_results:
+            print(f"  轮{r['round']} [{r['ingest_level']:4}] {r['chars']:>5} 字 / "
+                  f"{r['gen_secs']:>5.1f}s / 首字 {r['ttfc']}s / "
+                  f"3gram重复 {r['max_3gram_repeat']} / 拉丁 {r['latin_count']}"
+                  + ("  ⚠️复读中断" if r["stopped"] else ""))
+        chs = [r["chars"] for r in round_results]
+        print(f"  字数区间 {min(chs)}~{max(chs)}（波动 {(max(chs) - min(chs)) / max(1, sum(chs) / len(chs)) * 100:.0f}%）")
 
     # ---- S7 落库正文 ----
     print("[S7] 拉回落库正文 ...", end=" ")
@@ -314,18 +383,79 @@ def main():
     warn_all = warns
 
     # ---- S9 写后摄取 ----
-    print("[S9] 等待写后摄取（异步）...", end=" ")
-    mem_ok = False
-    for _ in range(30):
-        time.sleep(2)
-        mems = unwrap(http(base, "GET", f"/api/v1/projects/{pid}/memory/chapters"))
-        s = json.dumps(mems, ensure_ascii=False)
-        if cid in s or '"chapter_no": 1' in s or '"chapter_no":1' in s:
-            mem_ok = True
-            break
-    print("OK（章级记忆已生成）" if mem_ok else "超时未看到章级记忆（摄取可能失败）")
-    if not mem_ok:
-        fails_all.append("写后摄取 60s 内未产生章级记忆")
+    # 注意：第 1 轮若 ingest_level=none，本来就不会有记忆——不算失败。
+    if args.ingest_level == "none":
+        print("[S9] 摄取档位=none，跳过等待（本轮只验正文）")
+        mem_ok = True
+    else:
+        print("[S9] 等待写后摄取（异步）...", end=" ")
+        mem_ok = False
+        for _ in range(30):
+            time.sleep(2)
+            mems = unwrap(http(base, "GET", f"/api/v1/projects/{pid}/memory/chapters"))
+            s = json.dumps(mems, ensure_ascii=False)
+            if cid in s or '"chapter_no": 1' in s or '"chapter_no":1' in s:
+                mem_ok = True
+                break
+        print("OK（章级记忆已生成）" if mem_ok else "超时未看到章级记忆（摄取可能失败）")
+        if not mem_ok:
+            fails_all.append("写后摄取 60s 内未产生章级记忆")
+
+    # ---- S9b 资料库落库断言（--verify-db）----
+    # 补的是此前完全没测的一段：生成完的章是否真的写进了
+    # ① 章级记忆 ② 篇章摘要参考文档（「生成的小说存进参考文档」那个功能）
+    # ③ 实体入库（--seed-entities 时）
+    db_verify = {}
+    if args.verify_db:
+        print("[S9b] 资料库落库断言 ...")
+        # ① 章级记忆
+        mems = unwrap(http(base, "GET", f"/api/v1/projects/{pid}/memory/chapters")) or []
+        n_mem = len(mems) if isinstance(mems, list) else len(mems.get("items") or [])
+        db_verify["chapter_memories"] = n_mem
+        print(f"  章级记忆        : {n_mem} 条", "✅" if n_mem else "❌")
+        if args.ingest_level != "none" and not n_mem:
+            fails_all.append("章级记忆为 0（摄取未落库）")
+
+        # ② 篇章摘要参考文档（append_article_digest 的产物，文件名 = 篇章参考）
+        # ⚠️ 名字是「篇章参考」不是「篇章摘要」——后者只是 tags 里的标签，按它匹配必然 0 命中。
+        refs = unwrap(http(base, "GET", f"/api/v1/projects/{pid}/references")) or []
+        refs = refs if isinstance(refs, list) else (refs.get("items") or [])
+        digest_docs = [d for d in refs if (d.get("filename") or "") == "篇章参考"]
+        db_verify["digest_docs"] = len(digest_docs)
+        print(f"  篇章参考文档    : {len(digest_docs)} 份", "✅" if digest_docs else "❌")
+        if args.ingest_level != "none" and not digest_docs:
+            fails_all.append("未生成「篇章参考」文档（生成的小说没进参考库）")
+        if digest_docs:
+            # 列表接口「不含正文」，要拿 content_text 得再取详情
+            doc_id = digest_docs[0].get("id")
+            body = ""
+            try:
+                detail = unwrap(http(base, "GET", f"/api/v1/projects/{pid}/references/{doc_id}")) or {}
+                body = detail.get("content_text") or ""
+            except Exception as e:
+                print(f"    （取正文失败：{e}）")
+            has_mark = "<!-- ch:1 -->" in body or "第1章" in body
+            print(f"    含第 1 章摘要段: {'✅' if has_mark else '❌'}（{len(body)} 字）")
+            if not has_mark:
+                fails_all.append("篇章摘要文档里找不到第 1 章的段")
+
+        # ③ 实体入库
+        if args.seed_entities:
+            ents = {}
+            for kind, path in (("characters", "characters"), ("factions", "factions"),
+                               ("locations", "locations"), ("relations", "relations")):
+                try:
+                    lst = unwrap(http(base, "GET", f"/api/v1/projects/{pid}/{path}")) or []
+                    lst = lst if isinstance(lst, list) else (lst.get("items") or [])
+                    ents[kind] = len(lst)
+                except Exception:
+                    ents[kind] = -1
+            db_verify["entities"] = ents
+            print(f"  实体入库        : " +
+                  " / ".join(f"{k}={v}" for k, v in ents.items()))
+            empty = [k for k, v in ents.items() if v <= 0]
+            if empty:
+                fails_all.append(f"实体入库为空：{empty}（AI 抽取→落库链路断）")
 
     # ---- S10 清理 ----
     if args.keep:
@@ -361,6 +491,9 @@ def main():
         "metrics": m, "humanize_score": humanize_score,
         "events": events_seen, "stopped": stopped,
         "saved": saved_info, "memory_ok": mem_ok,
+        "rounds": rounds, "round_results": round_results,
+        "ingest_level": args.ingest_level, "db_verify": db_verify,
+        "entity_stats": entity_stats,
         "passed": not fails_all, "fails": fails_all, "warns": warn_all,
     }
     (rpt_dir / f"report-{ts}.json").write_text(

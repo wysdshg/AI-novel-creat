@@ -26,6 +26,10 @@ KEY_HUMANIZE_INJECT = "humanize.inject_on_generate"
 KEY_HUMANIZE_SCAN = "humanize.scan_after_generate"
 # 是否在每章生成后自动跑写后摄取（抽记忆 + 出走向）
 KEY_INGEST_ENABLED = "memory.ingest_after_generate"
+# 摄取内的记忆抽取：关掉后不调 LLM，改用规则兜底摘要（省 1 次调用，数据链不断）
+KEY_EXTRACT_ENABLED = "memory.extract_enabled"
+# 摄取内的概览向上聚合：关掉后篇级也走拼接，不再调 LLM 精炼（纯展示层，省 1 次调用）
+KEY_AGGREGATE_OVERVIEW = "memory.aggregate_overview"
 # 章后走向建议是否推送到对话区
 KEY_PUSH_DIRECTIONS = "memory.push_directions_to_chat"
 # 每隔多少章滚动压缩一次阶段摘要
@@ -39,6 +43,8 @@ DEFAULTS: dict[str, Any] = {
     KEY_HUMANIZE_INJECT: True,
     KEY_HUMANIZE_SCAN: True,
     KEY_INGEST_ENABLED: True,
+    KEY_EXTRACT_ENABLED: True,
+    KEY_AGGREGATE_OVERVIEW: True,
     KEY_PUSH_DIRECTIONS: True,
     KEY_STAGE_EVERY: 10,
     KEY_RECENT_MEMORY_N: 3,
@@ -50,6 +56,8 @@ DESCRIPTIONS: dict[str, str] = {
     KEY_HUMANIZE_INJECT: "章节生成时把去 AI 味规则前置注入提示词",
     KEY_HUMANIZE_SCAN: "章节生成后自动扫描 AI 味问题（只出报告不改文）",
     KEY_INGEST_ENABLED: "每章生成后自动抽取记忆并推演后续走向",
+    KEY_EXTRACT_ENABLED: "摄取时用 LLM 抽取章级记忆（关掉改用规则兜底摘要，省一次调用）",
+    KEY_AGGREGATE_OVERVIEW: "摄取时用 LLM 精炼篇级概览（关掉改纯拼接，概览页仍有内容）",
     KEY_PUSH_DIRECTIONS: "把章后走向建议以卡片形式推送到对话区",
     KEY_STAGE_EVERY: "每累积多少章滚动压缩一次阶段摘要",
     KEY_RECENT_MEMORY_N: "注入下一章的最近章级记忆条数",

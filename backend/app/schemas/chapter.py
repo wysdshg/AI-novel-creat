@@ -20,6 +20,8 @@ class GenerateRequest(BaseModel):
     chapter_id: Optional[str] = None          # 重新生成目标章节 ID（非空=覆盖该章，不新建）
     thread_chapter_id: Optional[str] = None   # 当前所在对话线程（章）；用于打包商讨 + 走向建议归位
     thread_conversation_id: Optional[str] = None  # 当前所在对话线程（会话）；同上
+    ingest_level: Optional[str] = None        # 写后摄取档位：full(默认) / lite(跳过概览聚合) / none(全跳)
+                                              # 仅给测试脚本多轮验证省调用用；不传=读全局配置，行为不变
 
 
 class ChapterBase(BaseModel):

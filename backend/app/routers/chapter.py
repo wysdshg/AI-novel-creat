@@ -312,11 +312,16 @@ def _global_topup_ids(db, project_id, hint: str | None, exclude_ids: set[str], t
 
 def _background_ingest(project_id: str, chapter_id: str,
                        push_chapter_id: str | None = None,
-                       push_conversation_id: str | None = None):
+                       push_conversation_id: str | None = None,
+                       ingest_level: str | None = None):
     """后台线程执行写后摄取：独立 DB 会话，绝不碰请求级 session（线程隔离铁律）。
 
     摄取完成只落库、不推 SSE（流已在 done 后关闭）；失败只打日志，不影响正文。
     push_chapter_id / push_conversation_id：走向建议归位的对话线程（与生成时所在线程一致）。
+    ingest_level：写后摄取档位（只传字符串，线程安全）——
+      full/None = 全跑（默认，读全局配置）；
+      lite      = 跳过概览聚合（省 1 次 LLM，走向/伏笔/记忆全保留）；
+      none      = 整段跳过（只验正文时用，省 2 次）。
     """
     try:
         t_db = _db.SessionLocal()
@@ -325,18 +330,27 @@ def _background_ingest(project_id: str, chapter_id: str,
             if ch is None:
                 logger.info(f"[generate_chapter] 后台摄取：章节不存在 id={chapter_id}")
                 return
+            lvl = (ingest_level or "full").lower()
+            do_extract = (lvl != "none")
+            do_aggregate = (lvl not in ("none", "lite"))
             res = ingestion.ingest_chapter(
                 t_db, project_id, ch,
                 push_chapter_id=push_chapter_id,
                 push_conversation_id=push_conversation_id,
+                extract=do_extract,
+                aggregate=do_aggregate,
             )
             t_db.commit()  # 保险：个别 CRUD 未内嵌 commit
             logger.info(
-                f"[generate_chapter] 后台摄取完成: memory={res.get('memory_id')} "
-                f"fallback={res.get('fallback')} dirs={res.get('directions_pushed', 0)}"
+                f"[generate_chapter] 后台摄取完成: level={lvl} memory={res.get('memory_id')} "
+                f"fallback={res.get('fallback')}({res.get('fallback_reason') or 'llm'}) "
+                f"dirs={res.get('directions_pushed', 0)}"
             )
             # 概览向上聚合（问题1）：写回 Article/Volume/Project.summary，
             # 概览页自动显示，不再「暂无 AI 概览」占位。失败不影响正文。
+            if not do_aggregate:
+                logger.info("[generate_chapter] 概览聚合已按 ingest_level 跳过")
+                return
             try:
                 agg = ingestion.aggregate_overview(t_db, project_id, ch.article_id, auto=True)
                 logger.info(
@@ -671,7 +685,7 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
                 # （INPUT 侧的商讨打包仍用 body.thread_chapter_id，不受影响。）
                 threading.Thread(
                     target=_background_ingest,
-                    args=(project_id, chapter.id, chapter.id, None),
+                    args=(project_id, chapter.id, chapter.id, None, body.ingest_level),
                     daemon=True,
                 ).start()
                 yield _sse("ingest_start", {"chapter_id": chapter.id, "async": True})

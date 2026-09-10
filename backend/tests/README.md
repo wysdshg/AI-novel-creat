@@ -17,7 +17,7 @@ backend/tests/
 │   ├── probe_pipeline.py     内部管线探针（假模型适配器 + 临时 DB，不碰真实数据）
 │   ├── probe_glm_ms.py       魔搭 GLM 原始 SSE 帧探测（换新模型时先跑这个，key 走环境变量）
 │   └── smoke_startup.py      启动冒烟（路由装配 + 建表 + SKILL 安装）
-├── unit/                ← pytest 单元测试（2026-09-10：119 用例全绿 ~9s）
+├── unit/                ← pytest 单元测试（2026-09-10：131 用例全绿 ~12s）
 │   ├── test_dedup.py         去重反误杀回归（fixtures/ 内 3 份真实轮次文本）
 │   ├── test_humanizer.py     去AI味打分回归
 │   ├── test_smoke.py         路由装配冒烟（import main，零 DB 副作用）
@@ -49,7 +49,23 @@ backend/tests/
    E:/AI小说创作/.venv/Scripts/python.exe -m pytest tests/unit/
    # e2e（分钟级，改生成链路后跑）
    E:/AI小说创作/.venv/Scripts/python.exe tests/e2e/test_full_chain.py
+   # e2e 跑 5 轮验文笔稳定性（只有第 1 轮全跑摄取，2~5 轮只生成，省 2/3 调用）
+   E:/AI小说创作/.venv/Scripts/python.exe tests/e2e/test_full_chain.py \
+       --rounds 5 --verify-db --seed-entities
    ```
+
+   **`test_full_chain.py` 的省调用参数（2026-09-10 新增）**——跑一次全链路原本要 3 次 LLM
+   调用（正文 1 + 记忆抽取 1 + 概览聚合·篇级 1），验证「文笔稳不稳」时后两次纯属白烧：
+
+   | 参数 | 作用 | 省几次 |
+   |---|---|---|
+   | `--ingest-level full\|lite\|none` | full=全跑；lite=跳过概览聚合（保留走向/伏笔/记忆）；**none=整段跳过摄取，只验正文** | none 省 2 次 |
+   | `--rounds N` | **第 1 轮按 `--ingest-level`，2~N 轮自动降为 none**；跑完打印各轮字数/耗时/重复率对照 | N 轮省 2(N-1) 次 |
+   | `--verify-db` | 断言资料库真的落库：章级记忆 / 「篇章参考」文档含本章段 / 实体入库非空 | — |
+   | `--seed-entities` | 生成前用**一次 `/command` 请求**让 AI 抽四类实体入库（+1 次调用，可并入第 1 轮） | 只加 1 次 |
+
+   典型组合：`--rounds 5 --verify-db --seed-entities` → 总调用 **1(实体) + 3(第1轮) + 4×1(2~5轮) = 8 次**，
+   而改造前跑 5 轮要 15 次且什么都验不了。
 6. 测试发现 bug → 先记 `docs/04-踩坑档案.md`，再修代码；测完更新 `docs/02-已实现清单.md`。
 7. ~~unit 需要 DB 的场景先重构 config 再建 fixture~~ **已完成（2026-09-10）**：`test_db` fixture 用 monkeypatch 改 `app.core.database` 模块的 `DEFAULT_DB_URL` + 重置惰性单例实现隔离，零生产代码改动；需要真实模型调用的才走 e2e。
 8. 接入新模型：先跑 `probe_glm_ms.py`（改 model 名）看原始 SSE 帧字段分布，再决定适配（见 04-B13——官方文档的响应结构说明不可信，第三方兼容层各有魔改）。
@@ -59,8 +75,10 @@ backend/tests/
 | 场景 | 跑什么 |
 |---|---|
 | 改了去重 / humanizer / 任何纯函数逻辑 | `pytest tests/unit/`（秒级，必跑） |
-| 改完任何后端代码提交前 | `pytest tests/unit/`（119 用例 ~9s） |
+| 改完任何后端代码提交前 | `pytest tests/unit/`（131 用例 ~12s） |
 | 改了生成链路 / prompt / 解码参数 | `test_full_chain.py`（必跑，看质量指标） |
+| 只验文笔稳定性（跑多轮，不想烧钱）| `test_full_chain.py --rounds 5`（2~5 轮自动跳过摄取）|
+| 改完摄取 / 记忆 / 概览 / 参考文档落库 | `test_full_chain.py --verify-db`（断言记忆+篇章参考真的落了）|
 | 改了检索（向量/关键词/RRF/rerank/实体图） | `test_retrieval_chain.py`（看 context 事件注入了什么） |
 | 改了按需加载（LOAD_REFS/LOAD_SETTING/目录/两阶段） | `test_on_demand_load.py`（看 refs 事件与答案是否真来自资料） |
 | 改了上下文引擎 / 摄取 / 记忆 / SKILL 调度 | `probe_pipeline.py`（快速回归，不花钱） |

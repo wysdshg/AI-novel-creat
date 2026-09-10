@@ -230,6 +230,8 @@ def ingest_chapter(
     push_directions: bool | None = None,
     push_chapter_id: str | None = None,
     push_conversation_id: str | None = None,
+    extract: bool | None = None,
+    aggregate: bool | None = None,
 ) -> dict:
     """一章写完后的全部收尾动作。
 
@@ -237,6 +239,13 @@ def ingest_chapter(
     → 够章数就压阶段摘要。
 
     每步独立 try，前一步失败不阻断后一步——记忆抽歪了不该导致摘要也不写。
+
+    分阶段开关（默认 None = 读 app_config，行为与旧版完全一致）：
+    - extract=False：跳过 LLM 抽取，改走 fallback_extract 规则兜底。
+      **不是**整段跳过——规则摘要仍会落库、篇章摘要与走向卡片链路不断，
+      只是摘要不如 AI 精炼。目的是「省一次调用但保留数据链」（测试多轮验证用）。
+    - aggregate=False：概览聚合的篇级不再调 LLM，退回 _concat_summary 拼接。
+      概览页照样有内容（展示层，不影响生成质量）。
     """
     result: dict[str, Any] = {"chapter_id": chapter.id, "chapter_no": chapter.chapter_no}
     content = (chapter.content or "").strip()
@@ -244,11 +253,19 @@ def ingest_chapter(
         result["skipped"] = "章节正文为空"
         return result
 
+    # 分阶段开关解析：显式入参优先，否则读全局配置（默认 True，保持旧行为）
+    if extract is None:
+        extract = bool(app_config.get(db, app_config.KEY_EXTRACT_ENABLED, True))
+    if aggregate is None:
+        aggregate = bool(app_config.get(db, app_config.KEY_AGGREGATE_OVERVIEW, True))
+    result["extract_llm"] = bool(extract)
+    result["aggregate_llm"] = bool(aggregate)
+
     # ---------- 1. 抽取 ----------
     extracted: dict | None = None
     raw_out = None
     m = _pick_model(db)
-    if m is not None:
+    if m is not None and extract:
         sys_parts = [EXTRACT_SYSTEM]
         skill_block = skill_dispatch.build_block(db, "memory")
         if skill_block:
@@ -274,6 +291,14 @@ def ingest_chapter(
     if used_fallback:
         extracted = fallback_extract(db, project_id, content)
     result["fallback"] = used_fallback
+    # 区分「LLM 抽取失败」与「按开关主动跳过」——日志/测试断言需要能分辨，
+    # 否则省调用被误读成抽取坏了。
+    result["fallback_reason"] = (
+        "extract_disabled" if (not extract) else ("llm_failed" if used_fallback else None)
+    )
+    # aggregate 开关由调用方（chapter.py 的后台线程）读取后决定是否跑概览聚合——
+    # 聚合不在本函数内，故把解析结果透出去，避免调用方再读一次配置造成不一致。
+    result["_aggregate"] = bool(aggregate)
 
     # ---------- 2. 落库 ----------
     try:

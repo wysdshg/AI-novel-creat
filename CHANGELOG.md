@@ -6,6 +6,16 @@
 ---
 
 ## 2026-09-10
+- **测试成本优化：写后摄取分阶段开关 + e2e 多轮省调用（用户拍板：fallback 兜底 / 默认全不动 / 第1轮按档 2~N 轮 none）**：
+  - **问题**：跑一次全链路要 **3 次 LLM 调用**（正文 1 + 记忆抽取 1 + 概览聚合·篇级 1）。验证「文笔稳定性」时后两次对目标零贡献——跑 5 轮 = 15 次调用，其中 10 次白烧。（阶段压缩不满 10 章不触发，本就免费；去AI味是本地算的，不调模型。）
+  - **新增 config 键**（默认全 True = 行为与改造前 100% 一致，零回归）：`memory.extract_enabled`（关掉改走 `fallback_extract` 规则兜底）、`memory.aggregate_overview`（关掉篇级概览改纯拼接）。
+  - **`ingest_chapter` 加 `extract` / `aggregate` 参数**（None=读配置，显式入参优先）。**关键设计**：`extract=False` **不是整段跳过**，而是走规则兜底——章级记忆仍落库，走向/伏笔/篇章参考链路不断，只是摘要不如 AI 精炼。新增 `fallback_reason` 字段区分「主动省调用」与「LLM 失败」，否则日志会把省调用误读成抽取坏了。
+  - **请求级 `ingest_level`**：`GenerateRequest.ingest_level` = full / lite（跳过聚合）/ none（全跳），经 `_background_ingest` 线程透传（只传字符串，守住「不传 ORM/session」铁律）。
+  - **`test_full_chain.py` 加 `--ingest-level` / `--rounds` / `--verify-db` / `--seed-entities`**。`--rounds N`：第 1 轮按档全跑（验闭环+断言），2~N 轮自动 none（只 1 次调用验文笔），跑完打印各轮字数/耗时/重复率对照 + 波动率。**5 轮从 15 次 → 7 次**，加实体入库测试共 8 次。
+  - **`--seed-entities` 补上此前完全没测的链路**：一次 `POST /command` 让 AI 抽四类实体全部入库（+1 次调用，并入第 1 轮）。**真机实测 4/4 非空**：characters=3 / factions=3 / locations=3 / relations=2。
+  - **`--verify-db` 真机实测**：章级记忆 1 条 ✅ / 「篇章参考」文档 1 份且含 `<!-- ch:1 -->` 段（370 字）✅ / 实体 4 类非空 ✅。**顺带证实**用户记忆中的「生成的小说会存进参考文档」功能确实工作——`append_article_digest` 把每章**摘要**追加进名为**「篇章参考」**的作品内文档（不是「篇章摘要」，后者只是 tags 标签；我第一版断言按 tags 匹配导致 0 命中，已修）。
+  - 测试：新增 `tests/unit/test_ingest_switches.py` **8 用例**；**全量单测 131 passed**。日志实证：第 1 轮 `fallback=False(llm)` + `dirs=3` + 概览聚合跑（篇=1 卷=1 小说=1）；第 2 轮 `fallback=True(extract_disabled)` + `dirs=0` + 「概览聚合已按 ingest_level 跳过」。
+  - **清理**：删除残留空壳作品 `E2E-20260910-105326`（正文 0 字 / 无记忆 / 无参考，是失败生成的壳）。作品列表现为空。
 - **Phase 2 收官（2.2 / 2.3 / 2.4 / 2.5 全部完成）+ config-chat 归档**：
   - **2.4 级联删除补孤儿**（先做，因为会留脏数据）：实测 4 处漏清——删角色后 `relations`（两端任一）/`skills.owner_id`/`locations.related_ids`/`factions.members`+`leader_id` 全指向已删角色；删章后 `chapter_memories` 残留（**危害最大**：后续章节还会把它注入上下文）；删篇漏 `chapter_memories`+`discussion_messages`+`reference_docs`；删卷漏上述全部。已在 `character_crud`/`chapter_crud`/`article_crud`/`volume_crud` 补齐。新增 4 用例（`_seed_four_levels` 造完整四级链），**全量 123 passed**。
   - **2.2 章节列表接线**：`ChapterListView.vue` 从「规划中」占位重写为真实页面——树形表格（卷→篇→章，复用 `store.structure`，与侧栏同源不重复请求）、关键词搜索（标题+正文）、状态筛选（全部/已写/草稿）、单章改名、单章删除、多选批量删除（逐条 DELETE，失败汇总不影响其余）、「进入」跳对话页。**顺带补了侧栏入口**——该路由原为 `hideTab: true` 且侧栏无菜单项，等于接线完也点不到（与 config-chat 同类问题）。
