@@ -9,6 +9,9 @@
 绝不能访问请求级 get_session() —— 工作流经 SSE 在线程池运行，请求级 session 已关闭。
 """
 from typing import Any, Dict, List, Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class NodeResult:
@@ -56,6 +59,9 @@ class BaseNode:
             if not isinstance(result, NodeResult):
                 result = NodeResult(outputs={"output": result})
         except Exception as e:  # noqa: BLE001
+            # 转成 failed 结果（前端能看到 error 文案），但堆栈只有日志里有——
+            # 节点内的异常往往是配置/数据问题，没有堆栈几乎无法定位（Phase 3.5）
+            logger.exception(f"[workflow_engine] 节点执行失败 node={self.id!r} label={self.label!r}")
             result = NodeResult(status="failed", error=f"{type(e).__name__}: {e}")
         result.inputs = inputs
         return result

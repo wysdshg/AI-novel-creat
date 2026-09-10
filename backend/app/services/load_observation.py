@@ -65,8 +65,9 @@ def record(
         logger.warning(f"[load_observation] 落库失败（忽略）: {e}")
         try:
             db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            # rollback 自身失败：连接已不可用。留痕（debug 级，避免与上面 warning 重复刷屏）Phase 3.5
+            logger.debug(f"[load_observation] rollback 失败（连接可能已断开）: {type(e).__name__}: {e}")
 
 
 def list_logs(

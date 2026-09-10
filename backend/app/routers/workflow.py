@@ -5,6 +5,7 @@
 - 运行：POST /workflows/{wf_id}/runs（SSE 流式），历史 GET /{wf_id}/runs，详情 GET /runs/{run_id}
 - 节点目录：GET /workflows/meta/node-types（前端节点面板渲染用）
 """
+import logging
 import queue
 import threading
 from typing import Optional
@@ -18,6 +19,8 @@ from app.core.response import ok, sse_event
 from app.models.orm import WorkflowNodeRunORM, WorkflowRunORM
 from app.schemas.workflow import WorkflowCreate, WorkflowUpdate, WorkflowRunRequest
 from app.services import workflow_crud as svc
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/workflows", tags=["工作流（全局）"])
 
@@ -108,6 +111,9 @@ def run_workflow(wf_id: str, body: WorkflowRunRequest, db: Session = Depends(get
             try:
                 holder["result"] = _run(wf_id, body.inputs or {}, event_cb=_cb)
             except Exception as e:  # noqa: BLE001
+                # 后台线程的异常无法自然冒泡到请求，只能捕获后经 SSE 的 error/run_end 事件回传。
+                # 这里必须 log.exception：SSE 只带 500 字截断的消息，堆栈只有日志里有（Phase 3.5）
+                logger.exception(f"[workflow] 工作流执行线程异常 wf_id={str(wf_id)[:8]}")
                 holder["error"] = e
             finally:
                 q.put(("done", None, None))

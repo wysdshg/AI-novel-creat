@@ -4,8 +4,11 @@
 用途：字数统计、文本清洗、把数组拼成提示词等。
 """
 import builtins
+import logging
 
 from ..base import BaseNode, NodeResult
+
+logger = logging.getLogger(__name__)
 
 _SAFE_BUILTIN_NAMES = {
     "len", "str", "int", "float", "bool", "list", "dict", "set", "tuple",
@@ -74,6 +77,9 @@ class CodeNode(BaseNode):
         try:
             exec(compile(code, "<workflow_code>", "exec"), glob, local)
         except Exception as e:  # noqa: BLE001
+            # 用户代码报错 → 转 failed 结果。必须 log.exception：作者写的片段有 bug 时，
+            # SSE 只显示一行错误，具体行号/堆栈只有日志能给出（Phase 3.5）
+            logger.exception(f"[workflow_engine.code] 代码节点执行失败 node={self.id!r}")
             return NodeResult(status="failed", error=f"代码执行失败: {type(e).__name__}: {e}")
 
         outputs = {}

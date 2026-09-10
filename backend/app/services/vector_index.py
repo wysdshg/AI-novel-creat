@@ -29,7 +29,10 @@ def enabled(db: Session) -> bool:
     """总开关：app_config 控制（默认开）。key 缺失时 embed 阶段还会再拦一次。"""
     try:
         return bool(app_config.get(db, KEY_VECTOR_INDEX, True))
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        # 读配置失败 → 保守关掉向量检索（增强能力，失败不能炸主流程）。
+        # 但必须留痕：否则「检索莫名不工作」时会先怀疑开关被关，实际是读配置就报错了（Phase 3.5）
+        logger.warning(f"[vector_index] 读取开关 {KEY_VECTOR_INDEX} 失败，本次按关闭处理: {type(e).__name__}: {e}")
         return False
 
 
@@ -81,8 +84,9 @@ def index_chunks(db: Session, project_id: str, source_type: str, source_id: str,
             if db.query(ProjectORM).filter_by(id=project_id).first() is None:
                 logger.warning(f"[vector_index] 项目 {str(project_id)[:8]} 已不存在，跳过向量写入")
                 return 0
-    except Exception:  # noqa: BLE001
-        pass  # 校验本身失败不应阻断索引（宁可写也不要静默不索引）
+    except Exception as e:  # noqa: BLE001
+        # 校验本身失败不应阻断索引（宁可写也不要静默不索引），但要留痕（Phase 3.5）
+        logger.warning(f"[vector_index] 项目存在性校验失败，仍继续索引: {type(e).__name__}: {e}")
 
     try:
         vecs = embedding_client.embed_texts(chunks, db=db)
@@ -116,7 +120,12 @@ def remove_source(db: Session, project_id: str, source_type: str, source_id: str
     """删除某来源的全部向量块。失败静默。"""
     try:
         return get_store(db).delete_by_source(db, project_id, source_type, source_id)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        # 删除失败返回 0 不炸调用方，但留痕：否则「删了文档向量却还在」无从排查（Phase 3.5）
+        logger.warning(
+            f"[vector_index] 删除向量块失败 project={str(project_id)[:8]} "
+            f"type={source_type} id={str(source_id)[:8]}: {type(e).__name__}: {e}"
+        )
         return 0
 
 
@@ -126,7 +135,11 @@ def index_reference_doc(db: Session, doc) -> int:
         remove_source(db, doc.project_id, ST_REF_DOC, doc.id)
         return index_chunks(db, doc.project_id, ST_REF_DOC, doc.id,
                             _chunk_text(doc.content_text or ""))
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"[vector_index] 参考文档索引失败 doc={str(getattr(doc, 'id', '?'))[:8]}: "
+            f"{type(e).__name__}: {e}"
+        )
         return 0
 
 
@@ -144,7 +157,8 @@ def reindex_project_references(db: Session, project_id: str) -> dict:
     stats = {"docs": 0, "chunks": 0}
     try:
         docs = db.query(ReferenceDocORM).filter_by(project_id=project_id).all()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[vector_index] 查询参考文档失败 project={str(project_id)[:8]}: {type(e).__name__}: {e}")
         return stats
     for doc in docs:
         stats["docs"] += 1

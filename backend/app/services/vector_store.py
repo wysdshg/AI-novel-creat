@@ -124,7 +124,11 @@ class BruteVectorStore:
                 project_id=project_id, source_type=source_type).all():
             try:
                 v = json.loads(row.embedding_json or "[]")
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                # 单行向量损坏 → 跳过（不能因一行坏数据让整次检索空手而归），但要留痕（Phase 3.5）
+                logger.warning(
+                    f"[vector_store] 跳过向量损坏的块 id={str(row.id)[:8]}: {type(e).__name__}: {e}"
+                )
                 continue
             if len(v) != len(qv):
                 continue
@@ -261,7 +265,11 @@ def rebuild_vec_index(db: Session) -> int:
         for cid, emb_json, pid, stype in rows:
             try:
                 v = json.loads(emb_json or "[]")
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                # 重建索引时跳过损坏行（其余行仍可正常重建），但要留痕（Phase 3.5）
+                logger.warning(
+                    f"[vector_store] 重建时跳过向量损坏的块 id={str(cid)[:8]}: {type(e).__name__}: {e}"
+                )
                 continue
             if len(v) != EMBED_DIM:
                 continue
@@ -293,7 +301,10 @@ def vec_index_available(db: Session) -> bool:
         if row is None:
             return False
         return "project_id" in (row[1] or "")
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        # 查不到 sqlite_master 只说明"无法确认可用"（保守回退 Brute 实现），但要留痕：
+        # 否则「为什么一直在用慢的 Brute 实现」将没有线索（Phase 3.5）
+        logger.warning(f"[vector_store] vec_index 可用性探测失败，回退 Brute 实现: {type(e).__name__}: {e}")
         return False
 
 

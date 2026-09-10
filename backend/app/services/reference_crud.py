@@ -125,8 +125,13 @@ def delete_reference(db: Session, project_id: str, doc_id: str) -> bool:
     try:
         from app.services import vector_index
         vector_index.remove_reference_doc(db, o)  # 向量块与文档同事务删除
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 删向量失败不阻断删文档（否则用户删不掉），但留痕：否则会留下孤儿向量块
+        # 且用户「删除后仍能检索到」无从解释（Phase 3.5）
+        logger.warning(
+            f"[reference_crud] 删除文档 {str(doc_id)[:8]} 的向量块失败，将留下孤儿向量: "
+            f"{type(e).__name__}: {e}"
+        )
     db.delete(o)
     db.commit()
     return True

@@ -14,10 +14,13 @@ Ollama 原生 /api/chat 端点对思考模型支持良好：
 - chat()         非流式 think=false，返回完整干净文本。
 """
 import json
+import logging
 import urllib.request
 import urllib.error
 
 from app.core.gateway.base import BaseModelAdapter
+
+logger = logging.getLogger(__name__)
 
 
 def _ollama_root(api_base: str) -> str:
@@ -145,7 +148,12 @@ class OllamaNativeAdapter(BaseModelAdapter):
                         continue
                     try:
                         obj = json.loads(line)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:  # noqa: BLE001
+                        # Ollama 每行一个 JSON（NDJSON）；容错跳过畸形行，但留痕（Phase 3.5）
+                        logger.warning(
+                            f"[ollama.stream] 跳过无法解析的 NDJSON 行: "
+                            f"{type(e).__name__}: {e}; line={line[:200]!r}"
+                        )
                         continue
                     msg = obj.get("message") or {}
                     if think:
@@ -160,6 +168,8 @@ class OllamaNativeAdapter(BaseModelAdapter):
             detail = e.read().decode("utf-8", "ignore")
             yield f"\n[模型调用失败 status={e.code}: {detail[:200]}]"
         except Exception as e:  # noqa: BLE001
+            # 流式失败前端只见短语，服务端留堆栈（Phase 3.5）
+            logger.exception(f"[ollama.stream] 流式调用异常 model={self.config.get('model_name')!r}")
             yield f"\n[模型调用异常: {str(e)[:200]}]"
 
     def stream(self, messages, **params):
@@ -195,7 +205,12 @@ class OllamaNativeAdapter(BaseModelAdapter):
                         continue
                     try:
                         obj = json.loads(line)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:  # noqa: BLE001
+                        # 同 _stream：容错跳过畸形 NDJSON 行，但留痕（Phase 3.5）
+                        logger.warning(
+                            f"[ollama.stream_with_thinking] 跳过无法解析的 NDJSON 行: "
+                            f"{type(e).__name__}: {e}; line={line[:200]!r}"
+                        )
                         continue
                     msg = obj.get("message") or {}
                     t = msg.get("thinking") or ""
@@ -210,6 +225,7 @@ class OllamaNativeAdapter(BaseModelAdapter):
             detail = e.read().decode("utf-8", "ignore")
             yield ("content", f"\n[模型调用失败 status={e.code}: {detail[:200]}]")
         except Exception as e:  # noqa: BLE001
+            logger.exception(f"[ollama.stream_with_thinking] 流式调用异常 model={self.config.get('model_name')!r}")
             yield ("content", f"\n[模型调用异常: {str(e)[:200]}]")
 
     def chat(self, messages, **params) -> str:
@@ -241,5 +257,7 @@ class OllamaNativeAdapter(BaseModelAdapter):
             req = _build_request(self._tags_url(), {}, self.config.get("api_key", ""))
             with urllib.request.urlopen(req, timeout=20) as resp:
                 return resp.getcode() == 200
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            # 「测试连接」失败要留痕：UI 只显示"连接失败"，日志才能说明是拒绝了还是连不上（Phase 3.5）
+            logger.warning(f"[ollama.test_connection] 连接测试失败: {type(e).__name__}: {e}")
             return False

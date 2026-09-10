@@ -92,7 +92,14 @@ def _extract_json(raw):
         return None
     try:
         return json.loads(s[start:end + 1])
-    except Exception:
+    except Exception as e:
+        # 模型返回的不是合法 JSON → 返回 None，调用方降级为"无变更"。
+        # 这是**最常见的模型行为偏差**（多余逗号/中文引号/截断），必须留痕并带上下文，
+        # 否则用户看到"指令没生效"时无从判断是模型没输出还是解析失败（Phase 3.5）
+        logger.warning(
+            f"[config_command] 模型返回的 JSON 解析失败（降级为无变更）: "
+            f"{type(e).__name__}: {e}; 片段={s[start:start + 200]!r}"
+        )
         return None
 
 
@@ -161,6 +168,8 @@ def run(db: Session, project_id: str, text: str, dry_run: bool = False,
         adapter = get_adapter(default.vendor, config)
         raw = adapter.chat(messages, temperature=0.3)
     except Exception as e:  # noqa: BLE001
+        # 结果里 model_ok=False 会告诉前端"模型没跑通"，服务端补堆栈（Phase 3.5）
+        logger.exception(f"[config_command] 模型调用失败 vendor={default.vendor!r}")
         return ok({
             "reply": f"模型调用失败：{str(e)[:200]}",
             "changes": _empty_changes(),

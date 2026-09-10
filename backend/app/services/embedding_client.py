@@ -10,10 +10,13 @@
   与余弦相似度单调等价——vector_store 的 vec0(L2) 与暴力余弦可混用。
 """
 import json
+import logging
 import math
 import os
 import urllib.error
 import urllib.request
+
+logger = logging.getLogger(__name__)
 
 BASE = "https://api.siliconflow.cn/v1"
 DEFAULT_MODEL = "BAAI/bge-m3"
@@ -46,8 +49,11 @@ def get_api_key(db=None) -> str:
             )
             if row and (row.api_key or "").strip():
                 return row.api_key.strip()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            # 第三级查找（模型配置表）失败 → 当作没找到，返回空串由上层降级为不索引。
+            # 必须留痕：三级 key 查找全空时用户看到的是"检索不工作"，日志要能区分
+            # 「真没配 key」与「查表就报错了」（Phase 3.5）
+            logger.warning(f"[embedding_client] 从模型配置表查 siliconflow key 失败: {type(e).__name__}: {e}")
     return ""
 
 

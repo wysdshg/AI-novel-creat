@@ -13,11 +13,14 @@
 """
 import time
 import uuid
+import logging
 from datetime import datetime, timezone
 from typing import Callable, Dict, Optional
 
 from app.core import database as _db
 from app.models.orm import WorkflowNodeRunORM, WorkflowORM, WorkflowRunORM
+
+logger = logging.getLogger(__name__)
 
 from .engine import GraphEngine, WorkflowError
 from .nodes import make_node
@@ -139,7 +142,10 @@ def run_workflow(
             run_orm.duration_ms = int((time.time() - t0) * 1000) if t0 else None
             try:
                 gen_db.commit()
-            except Exception:  # noqa: BLE001
+            except Exception as e2:  # noqa: BLE001
+                # 落"运行失败"记录本身失败：原始异常仍会 raise 给上层（不被吞），
+                # 但"失败都没记下来"这件事必须留痕，否则 DB 里会完全查不到这次运行（Phase 3.5）
+                logger.warning(f"[workflow_engine] 落失败运行记录时 commit 失败: {type(e2).__name__}: {e2}")
                 gen_db.rollback()
         raise
     finally:

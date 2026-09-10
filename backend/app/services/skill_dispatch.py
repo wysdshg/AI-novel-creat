@@ -17,11 +17,14 @@
 被互斥掉的 SKILL 会在返回值里单独列出，前端可以提示作者「你的X没生效，
 因为同为文风类的Y优先级更高」，避免作者改了半天不知道为什么没效果。
 """
+import logging
 from typing import Iterable
 
 from sqlalchemy.orm import Session
 
 from app.models.orm import CustomSkillORM
+
+logger = logging.getLogger(__name__)
 
 # 有效触发场景
 VALID_TRIGGERS = ("discussion", "chapter", "memory", "parse", "all")
@@ -58,7 +61,10 @@ def collect(db: Session, trigger: str) -> dict:
             .filter(CustomSkillORM.enabled.is_(True))
             .all()
         )
-    except Exception:  # noqa: BLE001 — 表未建好 / 字段缺失时静默降级
+    except Exception as e:  # noqa: BLE001 — 表未建好 / 字段缺失时静默降级
+        # SKILL 是增强项，查询失败不能拖垮生成；但留痕——否则「我写的 SKILL 完全没生效」
+        # 会先被怀疑成互斥规则问题，实际是这里查询就挂了（Phase 3.5）
+        logger.warning(f"[skill_dispatch] 查询 SKILL 失败 trigger={trigger}，本次按无 SKILL 处理: {type(e).__name__}: {e}")
         return empty
 
     candidates = [r for r in rows if (r.prompt_body or "").strip()]

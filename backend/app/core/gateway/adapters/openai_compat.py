@@ -42,6 +42,9 @@ def _http_post(api_base: str, api_key: str, payload: dict):
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "ignore")
     except Exception as e:  # noqa: BLE001
+        # 网络层异常 → 返回 status=-1，调用方据此抛「模型调用失败(status=-1): <msg>」给用户。
+        # 用户能看到原因，但看不到发生在哪一步（DNS？TLS？超时？）——补日志留痕（Phase 3.5）
+        logger.warning(f"[openai_compat] HTTP 请求异常 url={url}: {type(e).__name__}: {e}")
         return -1, str(e)
 
 
@@ -153,8 +156,10 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             extra = {k: v for k, v in payload.items() if k not in ("model", "messages", "stream")}
             logger.info(f"  其他参数={extra}")
             logger.info("===== [DEBUG] END =====\n")
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            # 仅调试日志本身出问题（如极端大的日志/编码异常）——绝不能因此影响真实请求，
+            # 但要留痕：否则"打开了 DEBUG 却什么都没打印"将无从解释（Phase 3.5）
+            logger.warning(f"[openai_compat] 调试日志打印失败（不影响请求）: {type(e).__name__}: {e}")
 
         return payload
 
@@ -225,7 +230,13 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
                             yield piece
                         elif reasoning:
                             _reasoning_buffer.append(reasoning)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:  # noqa: BLE001
+                        # 单帧畸形容错跳过（SSE 流不能因一帧坏掉而整条中断）。
+                        # 但要留痕：若某厂商改了响应结构，这里会连续刷同一告警，是唯一线索（Phase 3.5）
+                        logger.warning(
+                            f"[openai_compat.stream] 跳过无法解析的 SSE 帧: "
+                            f"{type(e).__name__}: {e}; data={data[:200]!r}"
+                        )
                         continue
             if not _content_seen and _reasoning_buffer:
                 fallback = "".join(_reasoning_buffer)
@@ -245,6 +256,8 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             yield f"\n[模型调用失败 status={e.code}: {detail[:200]}]"
         except Exception as e:  # noqa: BLE001
             # 超时（socket.timeout / URLError.timeout）单独给一句人话，别让用户看堆栈
+            # 但服务端必须留堆栈：流式失败时前端只拿到一句短文案（Phase 3.5）
+            logger.exception(f"[openai_compat.stream] 流式调用异常 model={self.config.get('model_name')!r}")
             if isinstance(e, (TimeoutError, socket.timeout)) or "timed out" in str(e).lower():
                 yield "\n[模型响应超时（90 秒无数据）。多为模型端卡住或网络不稳，建议重试；也可先关闭思考模式。]"
             else:
@@ -286,7 +299,12 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
                         if piece:
                             _content_seen = True
                             yield ("content", piece)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:  # noqa: BLE001
+                        # 同 stream()：容错跳过单帧，但留痕（Phase 3.5）
+                        logger.warning(
+                            f"[openai_compat.stream_with_thinking] 跳过无法解析的 SSE 帧: "
+                            f"{type(e).__name__}: {e}; data={data[:200]!r}"
+                        )
                         continue
             # 流正常结束：若正文始终未出现，把全部 reasoning 作为正文一次性兜底输出。
             # 但若是英文分析（如 ModelScope Qwen3.5 thinking 泄漏），直接输出会污染正文，改为拒绝。
@@ -305,6 +323,7 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             detail = e.read().decode("utf-8", "ignore")
             yield ("content", f"\n[模型调用失败 status={e.code}: {detail[:200]}]")
         except Exception as e:  # noqa: BLE001
+            logger.exception(f"[openai_compat.stream_with_thinking] 流式调用异常 model={self.config.get('model_name')!r}")
             yield ("content", f"\n[模型调用异常: {str(e)[:200]}]")
 
     async def astream(self, messages, **params):

@@ -204,6 +204,9 @@ def confirm_entities(project_id: str, body: ConfirmEntitiesRequest,
             else:
                 skipped.append({"name": name, "reason": f"未知类型 {it.kind}"})
         except Exception as e:  # noqa: BLE001
+            # 单条写入失败不阻断其余条目；但必须留痕：否则作者只看到"部分没写进去"，
+            # 无法知道是哪一条、为什么（reason 已回给前端，这里补服务端视角）Phase 3.5
+            logger.warning(f"[assist] 实体写入失败 name={name!r} kind={it.kind!r}: {type(e).__name__}: {e}")
             skipped.append({"name": name, "reason": f"写入失败：{str(e)[:100]}"})
 
     if body.chapter_id:
@@ -343,6 +346,8 @@ def polish_element(project_id: str, body: PolishElementRequest,
         adapter = get_adapter(default.vendor, adapter_config)
         text = adapter.chat(messages, **chat_params)
     except Exception as e:  # noqa: BLE001
+        # 前端能看到文案，服务端补堆栈（Phase 3.5）
+        logger.exception(f"[assist] 模型调用失败 vendor={default.vendor!r}")
         return fail(50201, f"模型调用失败：{str(e)[:200]}")
 
     # ⚠️ 曾打印模型原始返回前 1000 字（含用户文本内容）——隐私泄漏，改为只记长度（问题 1.1）。
@@ -375,5 +380,6 @@ def aggregate_overview_endpoint(project_id: str, body: AggregateOverviewRequest,
                                            model_id=body.model_id)
         return ok({"updated": agg})
     except Exception as e:  # noqa: BLE001
+        logger.exception(f"[assist] 概览聚合失败 project={str(project_id)[:8]}")
         return fail(50001, f"概览聚合失败：{str(e)[:200]}")
 

@@ -240,7 +240,10 @@ def _next_chapter_no(db, project_id: str, article_id: str) -> int:
             .all()
         )
         return (max((r[0] for r in rows if r[0] is not None), default=0)) + 1
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        # 算出下一章号失败 → 兜底 1（保证仍能生成，不至于卡住用户）。
+        # 留痕：若库里有章却总从 1 开始，说明这里一直在异常（Phase 3.5）
+        logger.warning(f"[chapter] 计算下一章号失败，回退为 1: {type(e).__name__}: {e}")
         return 1
 
 
@@ -380,8 +383,10 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
     try:
         art = article_crud.get_article(db, project_id, body.article_id)
         volume_id = getattr(art, "volume_id", None) if art else None
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 查篇失败 → volume_id 保持 None（上下文引擎少一层层级提示，不阻断生成）。
+        # 留痕，便于区分「篇确实无归属卷」与「查询报错」（Phase 3.5）
+        logger.warning(f"[chapter] 取篇的 volume_id 失败，将不带卷级上下文: {type(e).__name__}: {e}")
 
     # 章节序号：重新生成沿用原章号；新建按「本篇内最大序号 +1」计算（修复问题6）。
     chapter_no = body.chapter_no
@@ -576,9 +581,13 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
                     # 确保底层 HTTP 连接释放，模型不会继续空转计费。
                     try:
                         gen.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception as e:  # noqa: BLE001
+                        # 关上游生成器失败：连接可能未释放（极端下模型继续空转）。
+                        # 留痕不抛出——finally 里抛会掩盖真正的原始异常（Phase 3.5）
+                        logger.debug(f"[chapter] 关闭上游生成器失败（连接可能未释放）: {type(e).__name__}: {e}")
             except Exception as e:  # noqa: BLE001
+                # 生成中途失败：降级为占位正文，保证前端不空白。服务端必须留堆栈（Phase 3.5）
+                logger.exception(f"[generate_chapter] 章节生成失败，已降级为占位 project={str(project_id)[:8]}")
                 _note = f"[模型调用失败，已降级为占位：{str(e)[:200]}]"
                 error_notes.append(_note)
                 yield sse_event("chunk", {"text": "\n" + _note})  # 仅展示，不落库

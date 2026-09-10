@@ -4,6 +4,7 @@
 - is_default 维护「唯一默认生成模型」：设置某个为默认时，其余自动取消。
 - test_connection 经 gateway 适配器真实请求厂商接口，返回连通性与延迟。
 """
+import logging
 import time
 import uuid
 
@@ -16,6 +17,8 @@ from app.schemas.model import (
     ModelConfigUpdate,
     ModelTestRequest,
 )
+
+logger = logging.getLogger(__name__)
 from app.core.gateway.registry import get_adapter
 from app.core.response import ok
 
@@ -190,12 +193,16 @@ def test_connection(req: ModelTestRequest) -> dict:
     try:
         ok_conn = adapter.test_connection()
     except Exception as e:  # noqa: BLE001
+        # 结果里已带 msg 回给前端，但「测试连接」失败的原因（DNS/证书/拒绝）值得留痕（Phase 3.5）
+        logger.warning(f"[model_crud] 模型连接测试异常 vendor={req.vendor} model={req.model_name!r}: {type(e).__name__}: {e}")
         return {"ok": False, "latency_ms": int((time.time() - start) * 1000), "msg": str(e)[:200]}
     latency = int((time.time() - start) * 1000)
     return {
         "ok": bool(ok_conn),
         "latency_ms": latency,
-        "msg": "连接成功" if ok_conn else "连接失败（厂商返回非 200）",
+        # ⚠️ 文案原为「连接失败（厂商返回非 200）」——但 status=-1 表示**根本没拿到 HTTP 响应**
+        # （DNS 失败/连接被重置/超时），说成"厂商返回非 200"会把人引向错误的排查方向（Phase 3.5 修正）
+        "msg": "连接成功" if ok_conn else "连接失败（无法连通或厂商返回非 200）",
     }
 
 

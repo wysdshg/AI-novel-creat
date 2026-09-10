@@ -199,8 +199,10 @@ def _pick_model(db: Session):
         )
         if m:
             return m
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 查 memory 角色模型失败 → 继续走 get_default 兜底。留痕，便于区分
+        # 「确实没配 memory 模型」与「查表本身出错」（Phase 3.5）
+        logger.warning(f"[ingestion] 查 memory 角色模型失败，将回退默认模型: {type(e).__name__}: {e}")
     d = model_crud.get_default(db)
     if d is not None and (d.status or "active") == "active":
         return d

@@ -4,10 +4,13 @@ Anthropic 的 /v1/messages 端点与 OpenAI 不同：system 消息需放在顶�
 且 SSE 事件类型为 content_block_delta。其余与 OpenAI 兼容适配器对称实现。
 """
 import json
+import logging
 import urllib.request
 import urllib.error
 
 from app.core.gateway.base import BaseModelAdapter
+
+logger = logging.getLogger(__name__)
 
 
 def _build_request(url: str, payload: dict, api_key: str) -> urllib.request.Request:
@@ -28,6 +31,8 @@ def _http_post(api_base: str, api_key: str, payload: dict):
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", "ignore")
     except Exception as e:  # noqa: BLE001
+        # 网络层异常 → status=-1，调用方抛「模型调用失败(status=-1)」给用户；补日志留痕（Phase 3.5）
+        logger.warning(f"[claude] HTTP 请求异常 url={url}: {type(e).__name__}: {e}")
         return -1, str(e)
 
 
@@ -74,7 +79,12 @@ class ClaudeAdapter(BaseModelAdapter):
                     data = line[len("data:"):].strip()
                     try:
                         obj = json.loads(data)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:  # noqa: BLE001
+                        # 容错跳过单帧，但留痕（Phase 3.5）
+                        logger.warning(
+                            f"[claude.stream] 跳过无法解析的 SSE 帧: "
+                            f"{type(e).__name__}: {e}; data={data[:200]!r}"
+                        )
                         continue
                     if obj.get("type") == "content_block_delta":
                         text = obj.get("delta", {}).get("text", "")
@@ -84,6 +94,8 @@ class ClaudeAdapter(BaseModelAdapter):
             detail = e.read().decode("utf-8", "ignore")
             yield f"\n[模型调用失败 status={e.code}: {detail[:200]}]"
         except Exception as e:  # noqa: BLE001
+            # 流式失败时前端只拿到一句短文案，服务端必须留堆栈（Phase 3.5）
+            logger.exception(f"[claude.stream] 流式调用异常 model={self.config.get('model_name')!r}")
             yield f"\n[模型调用异常: {str(e)[:200]}]"
 
     async def astream(self, messages, **params):

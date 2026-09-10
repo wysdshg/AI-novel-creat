@@ -145,6 +145,8 @@ class ChapterNode(BaseNode):
                 max_tokens=max_tokens,
             ) or ""
         except Exception as e:  # noqa: BLE001
+            # 节点内不抛（转 failed 结果），故必须 log.exception 留堆栈：SSE 只回 200 字文案（Phase 3.5）
+            logger.exception(f"[workflow_engine.chapter] 章节生成节点模型调用失败 node={self.id!r}")
             return NodeResult(status="failed", error=f"模型调用失败: {type(e).__name__}: {str(e)[:200]}")
 
         # 后处理：尾部重复段落去重

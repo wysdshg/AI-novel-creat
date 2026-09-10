@@ -6,11 +6,14 @@
 读取全部走 get()，永远有兜底默认值——配置表为空时系统必须照常能跑。
 """
 from datetime import datetime, timezone
+import logging
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.models.orm import AppConfigORM
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 配置键约定（改默认值只改这里）
@@ -73,7 +76,9 @@ def get(db: Session, key: str, default: Any = None) -> Any:
     fallback = DEFAULTS.get(key, default)
     try:
         row = db.query(AppConfigORM).filter_by(key=key).first()
-    except Exception:  # noqa: BLE001 — 表还没建好时不能拖垮主流程
+    except Exception as e:  # noqa: BLE001 — 表还没建好时不能拖垮主流程
+        # 回落默认值不抛异常，但要留痕：否则「我明明改了配置怎么没生效」会先去怀疑配置值本身（Phase 3.5）
+        logger.warning(f"[app_config] 读取 {key} 失败，回落默认值 {fallback!r}: {type(e).__name__}: {e}")
         return fallback
     if row is None or row.value is None:
         return fallback
@@ -106,8 +111,9 @@ def get_all(db: Session) -> dict[str, Any]:
         for row in db.query(AppConfigORM).all():
             if row.value is not None:
                 merged[row.key] = row.value
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 全量读取失败 → 只返回默认值（管理页会显示"全是默认"，要能解释为什么）Phase 3.5
+        logger.warning(f"[app_config] 全量读取失败，仅返回默认值: {type(e).__name__}: {e}")
     return merged
 
 

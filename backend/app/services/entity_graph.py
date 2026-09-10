@@ -42,7 +42,10 @@ def enabled(db: Session) -> bool:
     """总开关（默认开）：app_config `retrieval.graph_expand`。"""
     try:
         return bool(app_config.get(db, KEY_GRAPH_EXPAND, True))
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        # 读配置失败 → 保守开（图谱扩展是增强能力，读不到开关时保持原行为）。
+        # 留痕，便于区分「开关被关」与「读配置失败」（Phase 3.5）
+        logger.warning(f"[entity_graph] 读取开关 {KEY_GRAPH_EXPAND} 失败，按开启处理: {type(e).__name__}: {e}")
         return True
 
 

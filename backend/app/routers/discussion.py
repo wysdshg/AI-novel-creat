@@ -101,8 +101,10 @@ def _collect_skill_blocks(db: Session) -> str:
             .order_by(CustomSkillORM.name)
             .all()
         )
-    except Exception:
-        # 表尚不存在或查询失败——降级为空段落，不能阻塞对话
+    except Exception as e:
+        # 表尚不存在或查询失败——降级为空段落，不能阻塞对话。
+        # 留痕：否则「我在商讨里挂的 SKILL 怎么不生效」会先被怀疑成互斥规则（Phase 3.5）
+        logger.warning(f"[discussion] 加载商讨 SKILL 失败，本次不带 SKILL: {type(e).__name__}: {e}")
         return ""
     blocks: list[str] = []
     for o in rows:
@@ -160,7 +162,9 @@ def _build_entity_suggestion(db: Session, project_id: str, user_text: str, ai_te
         from app.services.config_command import run as config_run
         # 用对话所选模型抽取（model_id 为 None 时回退默认模型）
         res = config_run(db, project_id, combined, dry_run=True, model_id=model_id)
-    except Exception:
+    except Exception as e:
+        # 实体建议抽取失败 → 本次不提示（纯增强）。留痕：否则「有时提示有时不提示」无法解释（Phase 3.5）
+        logger.warning(f"[discussion] 实体建议抽取失败，本次不提示: {type(e).__name__}: {e}")
         return None
 
     data = res.get("data", {})
@@ -451,8 +455,9 @@ def chat(
         try:
             conv_id = body.conversation_id
             add_message(db, project_id, "user", last_user_content, chapter_id=chapter_id, conversation_id=conv_id)
-        except Exception:
-            pass
+        except Exception as e:
+            # 落库失败不阻断流式生成，但留痕：这正是"重进后消息消失"的根因所在（Phase 3.5）
+            logger.warning(f"[discussion] 用户消息提前落库失败（可能导致重进后消息消失）: {type(e).__name__}: {e}")
 
     def event_stream():
         if not use_model:
@@ -554,6 +559,8 @@ def chat(
                 assistant_text=assistant_text, assistant_thinking=assistant_thinking,
             )))
         except Exception as e:  # noqa: BLE001
+            # 流式失败前端只见短语，服务端必须留堆栈（Phase 3.5）
+            logger.exception(f"[discussion] 项目商讨流式失败 project={str(project_id)[:8]}")
             yield sse_event("chunk", {"text": f"[模型调用失败：{str(e)[:200]}]"})
         finally:
             yield sse_event("done", {})
@@ -703,8 +710,9 @@ def global_chat(
     if last_user_content:
         try:
             add_message(db, GLOBAL_PROJECT_ID, "user", last_user_content, conversation_id=body.conversation_id)
-        except Exception:
-            pass  # 持久化失败不阻断主流程
+        except Exception as e:
+            # 持久化失败不阻断主流程，但留痕：这正是"重进后消息消失"的根因所在（Phase 3.5）
+            logger.warning(f"[discussion] 全局对话用户消息提前落库失败（可能导致重进后消息消失）: {type(e).__name__}: {e}")
 
     def event_stream():
         if not use_model:
@@ -801,6 +809,7 @@ def global_chat(
                 assistant_text=assistant_text, assistant_thinking=assistant_thinking,
             )))
         except Exception as e:  # noqa: BLE001
+            logger.exception("[discussion] 全局对话流式失败")
             yield sse_event("chunk", {"text": f"[模型调用失败：{str(e)[:200]}]"})
         finally:
             yield sse_event("done", {})

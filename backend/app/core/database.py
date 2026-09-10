@@ -35,8 +35,11 @@ def _load_sqlite_vec(dbapi_conn, _record):
         dbapi_conn.enable_load_extension(True)
         sqlite_vec.load(dbapi_conn)
         dbapi_conn.enable_load_extension(False)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 加载失败不阻断（vector_store 自动回退纯 Python 余弦，接口不变），但要留痕：
+        # 否则「检索一直很慢」会让人反复怀疑数据量，而真实原因是扩展没装上（Phase 3.5）。
+        # 用 debug 级：每个新连接都会触发，warning 会刷屏；排查时 NA_LOG_LEVEL=DEBUG 可见。
+        logger.debug(f"[database] sqlite-vec 扩展未加载（将回退纯 Python 余弦）: {type(e).__name__}: {e}")
 
 
 def get_engine():
@@ -182,7 +185,9 @@ def _ensure_vec_index(engine):
             if not n_vec:
                 try:
                     n_src = conn.execute(text("SELECT COUNT(*) FROM vector_chunks")).scalar() or 0
-                except Exception:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001
+                    # 数不出主表行数 → 当作 0（跳过回填）。留痕，便于区分「确实没数据」与「查询失败」
+                    logger.debug(f"[database] 统计 vector_chunks 行数失败，跳过回填: {type(e).__name__}: {e}")
                     n_src = 0
                 if n_src:
                     from app.services.vector_store import rebuild_vec_index

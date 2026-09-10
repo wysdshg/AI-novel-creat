@@ -6,6 +6,16 @@
 ---
 
 ## 2026-09-10
+- **Phase 3.5 全量 `except Exception` 补齐日志（107 处，消除 53 处「静默吞异常」）**：
+  - 用 `ast` 静态扫描 `backend/app/**/*.py`，把 broad-except 分成「已记日志 / 已 re-raise / **吞掉且既无日志也无 raise**」三类。实测 **107 处 broad-except，其中静默 53 处**（原计划估 78 处，实际更多；涉及 23 个文件，其中 10 个连 logger 都没有）。这类站点最要命：功能不工作时**服务端零痕迹**，只能靠用户描述来猜。
+  - **按类型分四类处置（不搞一刀切）**：
+    1. **`pass` / `continue` 完全静默型**（19 处）→ 全部补 `logger.warning` 并带可定位上下文。典型：SSE 单帧解析失败原本 `continue`，现在记 `跳过无法解析的 SSE 帧: <异常>; data=<原始片段>` —— 若某厂商改了响应结构，这条会连续刷，是唯一线索。
+    2. **`return False/None/空` 降级型**（7 处）→ 补 warning，写清"降级成了什么"（如「vec_index 探测失败，回退 Brute 实现」），否则「为什么一直在用慢实现」毫无线索。
+    3. **已把错误回给用户的**（8 处：`fail()` / SSE 文案 / `NodeResult(status='failed')`）→ 补 `logger.exception`。**理由：前端只显示 200 字截断文案，堆栈只有日志里有**；后台线程（工作流执行）的异常更是只能靠日志。
+    4. **重复触发型**（如 sqlite-vec 扩展**每个新连接**都加载一次）→ 用 `logger.debug`，避免 warning 刷屏；排查时 `NA_LOG_LEVEL=DEBUG` 可见。
+  - **顺带修 1 个会误导排查方向的文案**：`model_crud.test_connection` 在 status=-1（**根本没拿到 HTTP 响应**：DNS 失败 / 连接被重置 / 超时）时也显示「连接失败（厂商返回非 200）」→ 改为「（无法连通或厂商返回非 200）」。
+  - **新增护栏测试** `backend/tests/unit/test_except_logging.py`（2 例）：① 禁止 `app/**/*.py` 出现「无日志、无 raise、无 `noqa` 豁免」的 broad-except；② **哨兵测试**——断言扫描到的 broad-except ≥80 处，防止「因扫描逻辑失效而扫不到 → 测试假绿」。**护栏有效性已实证**：故意注入一处 `except Exception: pass` → 立即变红并精确报出 `load_observation.py:68`，随后还原。
+  - **验证**：全量 **160 单测 passed**（158 + 2 新护栏）；139 路由不变；真机 8011（**用户 8000 全程未动**）**12/12** —— 含**真实触发网络异常**以证实新增日志真的会打出：日志出现 `WARNING [app.core.gateway.adapters.openai_compat] [openai_compat] HTTP 请求异常 url=http://…/chat/completions: ConnectionResetError: [WinError 10054] …`；同时全程**仅 1 条 WARNING、0 ERROR**（确认无日志噪声回归）；全局对话 SSE 仍为 `context → chunk → done`、中文未被转义。验证完临时实例与数据即清理。
 - **Phase 3.4 统一 SSE 帧编码 + 模型解析（消 3 份 + 15 处重复，修 1 个真 bug）**：
   - **① SSE 帧编码 → `backend/app/core/response.py::sse_event(event, payload)`**：`chapter.py` / `discussion.py` / `workflow.py` **各写一份逐字相同的 `_sse()`**，另有 **15 处手拼裸帧**（`f"event: chunk\ndata: {json.dumps(...)}\n\n"`、`yield "event: done\ndata: {}\n\n"` 之类），全部收敛到单一实现。函数内部保证两条契约：
     - **`ensure_ascii=False` 不能漏** —— 否则中文正文全变 `\uXXXX` 转义（体积翻倍、前端还要再解一轮）；
