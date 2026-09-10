@@ -3,7 +3,10 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from app.models.orm import VolumeORM, ArticleORM, ChapterORM
+from app.models.orm import (
+    ArticleORM, ChapterMemoryORM, ChapterORM, DiscussionMessageORM,
+    ReferenceDocORM, VolumeORM,
+)
 from app.schemas.volume import VolumeCreate, VolumeUpdate
 
 
@@ -51,14 +54,35 @@ def update_volume(db: Session, project_id: str, volume_id: str, data: VolumeUpda
 
 
 def delete_volume(db: Session, project_id: str, volume_id: str) -> bool:
+    """删除卷，并级联清理其下篇/章**及其全部派生数据**（Phase 2.4）。
+
+    原实现只级联到 Article/Chapter，会留下被删章节的 `chapter_memories`、
+    以及篇维度的 `reference_docs`（篇章摘要）。这里一并对齐。
+    """
     o = get_volume(db, project_id, volume_id)
     if not o:
         return False
-    # 级联删除该卷下所有篇及其章节，避免孤儿数据
     article_ids = [r[0] for r in db.query(ArticleORM.id).filter_by(volume_id=volume_id).all()]
     if article_ids:
-        db.query(ChapterORM).filter(ChapterORM.article_id.in_(article_ids)).delete()
-        db.query(ArticleORM).filter(ArticleORM.id.in_(article_ids)).delete()
+        chapter_ids = [
+            r[0] for r in db.query(ChapterORM.id).filter(
+                ChapterORM.article_id.in_(article_ids)).all()
+        ]
+        if chapter_ids:
+            db.query(ChapterMemoryORM).filter(
+                ChapterMemoryORM.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
+            db.query(DiscussionMessageORM).filter(
+                DiscussionMessageORM.project_id == project_id,
+                DiscussionMessageORM.chapter_id.in_(chapter_ids),
+            ).delete(synchronize_session=False)
+        db.query(ChapterORM).filter(ChapterORM.article_id.in_(article_ids)).delete(
+            synchronize_session=False)
+        db.query(ReferenceDocORM).filter(
+            ReferenceDocORM.project_id == project_id,
+            ReferenceDocORM.article_id.in_(article_ids),
+        ).delete(synchronize_session=False)
+        db.query(ArticleORM).filter(ArticleORM.id.in_(article_ids)).delete(
+            synchronize_session=False)
     db.delete(o)
     db.commit()
     return True

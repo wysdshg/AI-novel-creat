@@ -3,7 +3,10 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from app.models.orm import ArticleORM, VolumeORM, ChapterORM
+from app.models.orm import (
+    ArticleORM, ChapterMemoryORM, ChapterORM, DiscussionMessageORM,
+    ReferenceDocORM, VolumeORM,
+)
 from app.schemas.article import ArticleCreate, ArticleUpdate
 
 
@@ -65,10 +68,29 @@ def update_article(db: Session, project_id: str, article_id: str, data: ArticleU
 
 
 def delete_article(db: Session, project_id: str, article_id: str) -> bool:
+    """删除篇，并级联清理其下章节**及其全部派生数据**（Phase 2.4）。
+
+    实测（2026-09-10）原实现只删 ChapterORM，会留下：
+      - `chapter_memories`：被删章节的章级记忆（后续章节还会把它注入上下文）
+      - `discussion_messages`：这些章的商讨线程
+      - `reference_docs`：`article_id` 指向该篇的篇章摘要文档
+    """
     o = get_article(db, project_id, article_id)
     if not o:
         return False
-    db.query(ChapterORM).filter_by(article_id=article_id).delete()
+
+    chapter_ids = [r[0] for r in db.query(ChapterORM.id).filter_by(article_id=article_id).all()]
+    if chapter_ids:
+        db.query(ChapterMemoryORM).filter(
+            ChapterMemoryORM.chapter_id.in_(chapter_ids)).delete(synchronize_session=False)
+        db.query(DiscussionMessageORM).filter(
+            DiscussionMessageORM.project_id == project_id,
+            DiscussionMessageORM.chapter_id.in_(chapter_ids),
+        ).delete(synchronize_session=False)
+    db.query(ChapterORM).filter_by(article_id=article_id).delete(synchronize_session=False)
+    # 篇章维度的参考文档（每篇一份的「篇章参考」）
+    db.query(ReferenceDocORM).filter_by(project_id=project_id, article_id=article_id).delete(
+        synchronize_session=False)
     db.delete(o)
     db.commit()
     return True

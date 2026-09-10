@@ -29,6 +29,9 @@ export const useProjectStore = defineStore('project', {
     // 当前小说的剧情商讨消息（user/ai），由 ChatView 展示、ChatInput 发送共享
     discussionMessages: [],
     sendingDiscussion: false,
+    // 流式商讨的中止句柄（问题 2.5）：ChatInput 的「停止」按钮调 stopDiscussion()，
+    // 中止 fetch 后后端会断开 LLM 连接（立即停止计费）。非响应式内部字段，不参与渲染。
+    _discussionController: null,
     // 「豆包式」对话会话：UI 维度——独立记忆的占位，localStorage 持久化。
     // 每个会话记录 { id, title, novelId, createdAt }；
     // 当前会话 id 为 '' 表示「未进入」→ ChatView 走欢迎态。
@@ -252,6 +255,7 @@ export const useProjectStore = defineStore('project', {
           .map((m) => ({ role: m.role === 'ai' ? 'assistant' : 'user', content: m.content }))
 
         this.sendingDiscussion = true
+        this._discussionController = new AbortController()
         try {
           await discussionGlobalChatStream(
             { messages: history, enable_thinking: enableThinking, model_id: this.currentModelId || undefined, conversation_id: this.currentConversationId || null },
@@ -272,11 +276,13 @@ export const useProjectStore = defineStore('project', {
                 this.sendingDiscussion = false
               }
             },
+            { signal: this._discussionController.signal },
           )
         } catch (e) {
-          this.discussionMessages[aiIndex].content += `\n[发送失败：${e?.message || e}]`
+          this._appendStreamError(aiIndex, e)
         } finally {
           this.sendingDiscussion = false
+          this._discussionController = null
         }
         return
       }
@@ -302,6 +308,7 @@ export const useProjectStore = defineStore('project', {
       // 属隐私泄漏，已移除（问题 1.1）。
 
       this.sendingDiscussion = true
+      this._discussionController = new AbortController()
       try {
         await discussionChatStream(
           this.currentNovelId,
@@ -334,12 +341,43 @@ export const useProjectStore = defineStore('project', {
             }
           },
           this.currentChapterId,
+          { signal: this._discussionController.signal },
         )
       } catch (e) {
-        this.discussionMessages[aiIndex].content += `\n[发送失败：${e?.message || e}]`
+        this._appendStreamError(aiIndex, e)
       } finally {
         this.sendingDiscussion = false
+        this._discussionController = null
       }
+    },
+
+    // 手动停止当前流式商讨：中止 fetch → 后端断开 LLM 连接（立即停止计费）。
+    // 已流出的内容保留在气泡里；状态复位后用户可以继续追问或重发。
+    stopDiscussion() {
+      if (this._discussionController) {
+        this._discussionController.abort()
+        this._discussionController = null
+      }
+      this.sendingDiscussion = false
+    },
+
+    // 把流式失败写进 AI 气泡。手动停止（GenerationStopped）用中性提示，
+    // 不写成「发送失败」——否则用户点了停止却看到红字报错，像是出故障了。
+    _appendStreamError(aiIndex, e) {
+      const msg = this.discussionMessages[aiIndex]
+      if (!msg) return
+      if (e?.name === 'GenerationStopped') {
+        this.discussionMessages.splice(aiIndex, 1, {
+          ...msg,
+          content: msg.content || '（已停止生成）',
+          stopped: true,
+        })
+        return
+      }
+      this.discussionMessages.splice(aiIndex, 1, {
+        ...msg,
+        content: msg.content + `\n[发送失败：${e?.message || e}]`,
+      })
     },
     // 从后端加载当前线程的商讨记录（持久化缓存），映射到前端消息结构。
     // 线程优先级：conversationId > chapterId > 小说级默认线程。

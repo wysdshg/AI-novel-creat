@@ -7,7 +7,7 @@ import uuid
 
 from sqlalchemy.orm import Session
 
-from app.models.orm import ChapterORM, ProjectORM
+from app.models.orm import ChapterMemoryORM, ChapterORM, ProjectORM
 from app.schemas.chapter import ChapterCreate, ChapterUpdate
 from app.services.discussion_crud import clear_messages
 
@@ -71,6 +71,10 @@ def delete_chapter(db: Session, project_id: str, chapter_id: str) -> bool:
         return False
     # 级联清理该章节的商讨线程（避免孤儿对话残留）
     clear_messages(db, project_id, chapter_id=chapter_id)
+    # 级联清理该章节的「章级记忆」（Phase 2.4）：实测原实现会留下孤儿记忆行，
+    # 而记忆会被后续章节的上下文注入读到 → 删了章却还能"回忆"到它。
+    db.query(ChapterMemoryORM).filter_by(project_id=project_id, chapter_id=chapter_id).delete(
+        synchronize_session=False)
     db.delete(o)
     proj = db.query(ProjectORM).filter_by(id=project_id).first()
     if proj and (proj.chapter_count or 0) > 0:

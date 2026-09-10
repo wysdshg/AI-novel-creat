@@ -12,6 +12,7 @@ siliconflow（硅基流动）/ nvidia（英伟达 NIM）/ zhipu（智谱 GLM）�
 import logging
 import json
 import re
+import socket
 import urllib.request
 import urllib.error
 
@@ -204,7 +205,9 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
         _reasoning_buffer = []
         _content_seen = False
         try:
-            with urllib.request.urlopen(req, timeout=240) as resp:
+            # 超时 90s（原 240s）：URL 级 timeout 是「整条流」的读超时，模型卡住时
+            # 会让用户干等 4 分钟才见到报错。90s 足够云端首字+长文分帧，卡住也能较快失败。
+            with urllib.request.urlopen(req, timeout=90) as resp:
                 for raw in resp:
                     line = raw.decode("utf-8").strip()
                     if not line or not line.startswith("data:"):
@@ -241,7 +244,11 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             detail = e.read().decode("utf-8", "ignore")
             yield f"\n[模型调用失败 status={e.code}: {detail[:200]}]"
         except Exception as e:  # noqa: BLE001
-            yield f"\n[模型调用异常: {str(e)[:200]}]"
+            # 超时（socket.timeout / URLError.timeout）单独给一句人话，别让用户看堆栈
+            if isinstance(e, (TimeoutError, socket.timeout)) or "timed out" in str(e).lower():
+                yield "\n[模型响应超时（90 秒无数据）。多为模型端卡住或网络不稳，建议重试；也可先关闭思考模式。]"
+            else:
+                yield f"\n[模型调用异常: {str(e)[:200]}]"
 
     def stream_with_thinking(self, messages, **params):
         """流式返回「思考过程 + 正文」两种片段（供思考可见化展示）。

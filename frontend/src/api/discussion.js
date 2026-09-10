@@ -11,12 +11,19 @@ function createTimeoutController(ms = SSE_TIMEOUT_MS) {
 }
 
 // 流式对话（SSE，使用 fetch 直接读流）
-export async function discussionChatStream(projectId, body, onEvent, chapterId) {
+// 支持外部传入 { signal } 实现手动停止；中止后抛 name='GenerationStopped' 的错误，
+// 便于调用方与「网络/超时」错误区分开（否则中止会被当成失败弹红字）。
+export async function discussionChatStream(projectId, body, onEvent, chapterId, { signal } = {}) {
   const q = chapterId ? `?chapter_id=${encodeURIComponent(chapterId)}` : ''
-  const url = `/api/v1/projects/${projectId}/discussion/chat${q}`
   // 注意：此处曾有 console.group 打印完整 Body / 最后一条用户消息正文 / system prompt。
   // 属隐私泄漏（用户输入全文进控制台），已移除（问题 1.1）。排查时只打无内容信息（条数/开关）。
   const { controller, cleanup } = createTimeoutController()
+  // 外部 signal 与超时 controller 合并：任一触发即中止 fetch
+  const onExternalAbort = () => controller.abort()
+  if (signal) {
+    if (signal.aborted) controller.abort()
+    else signal.addEventListener('abort', onExternalAbort, { once: true })
+  }
   try {
     const resp = await fetch(`/api/v1/projects/${projectId}/discussion/chat${q}`, {
       method: 'POST',
@@ -48,17 +55,30 @@ export async function discussionChatStream(projectId, body, onEvent, chapterId) 
         }
       }
     }
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      const err = new Error('已停止生成')
+      err.name = 'GenerationStopped'
+      throw err
+    }
+    throw e
   } finally {
+    if (signal) signal.removeEventListener('abort', onExternalAbort)
     cleanup()
   }
 }
 
 // 全局对话（无需选择小说，类似豆包/ChatGPT 通用助手模式）
 // 注入全局设定库 + 全局 SKILL，不含任何小说数据
-export async function discussionGlobalChatStream(body, onEvent) {
+export async function discussionGlobalChatStream(body, onEvent, { signal } = {}) {
   // 注意：此处曾有 console.group 打印完整 Body / 最后一条用户消息正文，属隐私泄漏，
   // 已移除（问题 1.1）。
   const { controller, cleanup } = createTimeoutController()
+  const onExternalAbort = () => controller.abort()
+  if (signal) {
+    if (signal.aborted) controller.abort()
+    else signal.addEventListener('abort', onExternalAbort, { once: true })
+  }
   try {
     const resp = await fetch('/api/v1/discussion/global-chat', {
       method: 'POST',
@@ -90,7 +110,15 @@ export async function discussionGlobalChatStream(body, onEvent) {
         }
       }
     }
+  } catch (e) {
+    if (e?.name === 'AbortError') {
+      const err = new Error('已停止生成')
+      err.name = 'GenerationStopped'
+      throw err
+    }
+    throw e
   } finally {
+    if (signal) signal.removeEventListener('abort', onExternalAbort)
     cleanup()
   }
 }

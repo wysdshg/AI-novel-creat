@@ -166,9 +166,35 @@ const onWelcomeSend = async () => {
 
 // 点走向卡片 = 把这条方向作为下一章的共识发进商讨。
 // 走消息而不是直接改章节要点，是为了留痕——作者事后能看到当初为什么这么写。
+// 附加行为：若当前正处在「第 N 章」的章级上下文，且第 N+1 章已存在，则自动切到
+// 下一章再发——否则这条方向会落在第 N 章的线程里，而作者真正要写的是第 N+1 章
+// （问题 2.3 根因：走向卡片点了，消息却进了旧章，作者还得手动再切一次）。
 const onPickDirection = async (d) => {
   const text = `就按这个方向走：${d.title}。${d.detail || ''}`
+  const cur = store.currentChapter
+  if (cur) {
+    const next = findNextChapter(cur)
+    if (next && next.id !== store.currentChapterId) {
+      store.selectChapter(next.id)
+      ElMessage.info(`已切到第 ${next.chapter_no} 章，方向已写入该章商讨`)
+    }
+  }
   await store.sendDiscussion(text, enableThinking.value)
+}
+
+// 在 4 级结构里按 chapter_no 找当前章的下一章（同篇优先，跨篇继续向后找）
+const findNextChapter = (cur) => {
+  let best = null
+  for (const v of store.structure.volumes || []) {
+    for (const a of v.articles || []) {
+      for (const c of a.chapters || []) {
+        if (c.id === cur.id) continue
+        if ((c.chapter_no || 0) <= (cur.chapter_no || 0)) continue
+        if (!best || (c.chapter_no || 0) < (best.chapter_no || 0)) best = c
+      }
+    }
+  }
+  return best
 }
 
 // AI 在对话中识别到的新角色/势力/地点 → 一键确认写进资料库。

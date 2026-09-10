@@ -111,6 +111,8 @@
             <div v-else-if="m.role === 'ai' && m.thinking" class="cp-answer cp-answer--pending">
               正在思考并组织回答…
             </div>
+            <!-- 手动停止标记：中性灰提示，不用红色报错样式（那会让用户以为是故障） -->
+            <div v-if="m.stopped" class="cp-stopped">已停止生成（已保留上方内容）</div>
           </template>
         </div>
       </div>
@@ -217,6 +219,13 @@ const tensionClass = (t) => {
 }
 .cp-answer { white-space: pre-wrap; word-break: break-word; }
 .cp-answer--pending { color: #c0c4cc; font-style: italic; }
+.cp-stopped {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--el-border-color-light);
+  font-size: 12px;
+  color: #909399;
+}
 
 /* —— 章后走向卡片 —— */
 .cp-dirs { white-space: normal; }

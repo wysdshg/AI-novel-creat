@@ -107,3 +107,117 @@ def test_delete_is_scoped_to_one_project(test_db):
 def test_delete_missing_project_returns_false(test_db):
     from app.services import project_crud
     assert project_crud.delete_project(test_db, "nonexistent-id") is False
+
+
+# ===========================================================================
+# Phase 2.4：**下级**删除的级联（2026-09-10 实测补漏前会留孤儿）
+# ===========================================================================
+
+def _seed_four_levels(db):
+    """建一条含「派生数据」的完整链：卷/篇/章(+记忆+商讨)/角色(+关系+技能+地点关联)。"""
+    import uuid as _uuid
+
+    from app.models.orm import (
+        CharacterORM, ChapterMemoryORM, DiscussionMessageORM, FactionORM,
+        LocationORM, ProjectORM, ReferenceDocORM, RelationORM, SkillORM,
+    )
+    from app.schemas.chapter import ChapterCreate
+    from app.schemas.article import ArticleCreate
+    from app.schemas.volume import VolumeCreate
+    from app.services import article_crud, chapter_crud, volume_crud
+
+    pid = _uuid.uuid4().hex
+    db.add(ProjectORM(id=pid, name="2.4级联", genre="测试"))
+    db.commit()
+
+    vol = volume_crud.create_volume(db, pid, VolumeCreate(name="卷一", summary=""))
+    art = article_crud.create_article(db, pid, ArticleCreate(volume_id=vol.id, name="篇一", summary=""))
+
+    c1, c2 = _uuid.uuid4().hex, _uuid.uuid4().hex
+    db.add(CharacterORM(id=c1, project_id=pid, name="角色甲"))
+    db.add(CharacterORM(id=c2, project_id=pid, name="角色乙"))
+    db.add(RelationORM(id=_uuid.uuid4().hex, project_id=pid,
+                       subject_id=c1, object_id=c2, relation_type="师徒"))
+    db.add(SkillORM(id=_uuid.uuid4().hex, project_id=pid, name="技能", owner_id=c1))
+    loc = LocationORM(id=_uuid.uuid4().hex, project_id=pid, name="某地", related_ids=[c1, c2])
+    db.add(loc)
+    fac = FactionORM(id=_uuid.uuid4().hex, project_id=pid, name="某宗",
+                     members=["角色甲"], leader_id=c1)
+    db.add(fac)
+
+    ch = chapter_crud.create_chapter(
+        db, pid, ChapterCreate(chapter_no=1, title="第一章", content="雨落在青石板上。" * 20,
+                               word_count=140, article_id=art.id))
+    db.add(ChapterMemoryORM(id=_uuid.uuid4().hex, project_id=pid, chapter_id=ch.id,
+                            chapter_no=1, summary="摘要"))
+    db.add(DiscussionMessageORM(id=_uuid.uuid4().hex, project_id=pid, chapter_id=ch.id,
+                                role="user", content="这章的走向"))
+    db.add(ReferenceDocORM(id=_uuid.uuid4().hex, project_id=pid, article_id=art.id,
+                           filename="篇章参考", content_text="t", source="auto"))
+    db.commit()
+    return pid, vol.id, art.id, ch.id, c1
+
+
+def test_delete_character_clears_references(test_db):
+    """删角色必须同时清掉：关系（两端任一）、技能 owner、地点关联、势力成员/掌门。"""
+    from app.models.orm import (
+        FactionORM, LocationORM, RelationORM, SkillORM,
+    )
+    from app.services import character_crud
+
+    pid, _vid, _aid, _cid, c1 = _seed_four_levels(test_db)
+    character_crud.delete_character(test_db, pid, c1)
+
+    for m in (RelationORM, SkillORM):
+        assert test_db.query(m).filter_by(project_id=pid).count() == 0, \
+            f"{m.__tablename__} 残留孤儿（指向已删角色）"
+    loc = test_db.query(LocationORM).filter_by(project_id=pid).first()
+    assert c1 not in (loc.related_ids or []), "地点 related_ids 未清理"
+    fac = test_db.query(FactionORM).filter_by(project_id=pid).first()
+    assert fac.leader_id is None, "势力 leader_id 未清理"
+    assert "角色甲" not in (fac.members or []), "势力 members 未清理"
+
+
+def test_delete_chapter_clears_memory(test_db):
+    """删章必须同时清掉该章的「章级记忆」（否则后续章节还会把它注入上下文）。"""
+    from app.models.orm import ChapterMemoryORM
+    from app.services import chapter_crud
+
+    pid, _vid, _aid, cid, _c1 = _seed_four_levels(test_db)
+    chapter_crud.delete_chapter(test_db, pid, cid)
+    assert test_db.query(ChapterMemoryORM).filter_by(project_id=pid).count() == 0
+
+
+def test_delete_article_clears_memory_and_digest(test_db):
+    """删篇必须级联清掉：章级记忆 + 章商讨线程 + 篇章参考文档。"""
+    from app.models.orm import ChapterMemoryORM, DiscussionMessageORM, ReferenceDocORM
+    from app.services import article_crud
+
+    pid, _vid, aid, _cid, _c1 = _seed_four_levels(test_db)
+    article_crud.delete_article(test_db, pid, aid)
+    for m in (ChapterMemoryORM, ReferenceDocORM):
+        assert test_db.query(m).filter_by(project_id=pid).count() == 0, \
+            f"{m.__tablename__} 残留孤儿"
+    assert test_db.query(DiscussionMessageORM).filter_by(project_id=pid).count() == 0
+
+
+def test_delete_volume_clears_all_derived(test_db):
+    """删卷 → 篇/章及其派生数据（记忆/商讨/篇章参考）全部清空，角色等无关数据保留。"""
+    from app.models.orm import (
+        ChapterMemoryORM, ChapterORM, DiscussionMessageORM,
+        ReferenceDocORM,
+    )
+    from app.services import volume_crud
+
+    pid, vid, _aid, _cid, _c1 = _seed_four_levels(test_db)
+    volume_crud.delete_volume(test_db, pid, vid)
+
+    for m in (ChapterORM, ChapterMemoryORM, ReferenceDocORM, DiscussionMessageORM):
+        assert test_db.query(m).filter_by(project_id=pid).count() == 0, \
+            f"{m.__tablename__} 残留孤儿"
+    # 角色/地点/势力属作品级，不应被卷删除波及
+    from app.models.orm import CharacterORM
+    assert test_db.query(CharacterORM).filter_by(project_id=pid).count() == 2
+
+
+# ===========================================================================

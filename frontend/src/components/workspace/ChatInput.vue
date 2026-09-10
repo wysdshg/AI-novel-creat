@@ -69,9 +69,11 @@
 
       <div class="ci-spacer" />
       <el-button :disabled="store.sendingDiscussion" @click="onClear">清空</el-button>
-      <el-button :disabled="store.sendingDiscussion" @click="onSend">
-        {{ store.sendingDiscussion ? '回复中…' : '发送' }}
+      <!-- 回复中把「发送」换成「停止」：点了立即中止流式请求，后端随之断开 LLM（停止计费） -->
+      <el-button v-if="store.sendingDiscussion" type="danger" plain @click="onStop">
+        停止生成
       </el-button>
+      <el-button v-else @click="onSend">发送</el-button>
       <el-tooltip content="请先在左侧选择一篇或一章，再生成章节" :disabled="!!activeArticleId" placement="top">
         <span>
           <el-button type="primary" :disabled="!activeArticleId" @click="onGenerate">生成章节</el-button>
@@ -328,6 +330,11 @@ const onGenerate = () => {
   if (!store.currentNovelId) return ElMessage.warning('请先选择一本小说')
   if (!activeArticleId.value) return ElMessage.warning('请先在左侧选择一篇或一章，再生成章节')
   genVisible.value = true
+}
+// 停止流式商讨：中止 fetch，后端断开 LLM 连接立即停止计费；已流出的内容保留在气泡里
+const onStop = () => {
+  store.stopDiscussion()
+  ElMessage.info('已停止生成')
 }
 const onClear = async () => {
   // store.clearDiscussion 内部已区分：未选小说 → 清全局线程；否则清章/会话线程

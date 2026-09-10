@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.models.orm import CharacterORM
+from app.models.orm import CharacterORM, FactionORM, LocationORM, RelationORM, SkillORM
 from app.schemas.database import Character, CharacterCreate, CharacterUpdate
 
 
@@ -95,9 +95,41 @@ def update_character(
 
 
 def delete_character(db: Session, project_id: str, character_id: str) -> bool:
+    """删除角色，并**清掉所有指向它的引用**（Phase 2.4）。
+
+    实测（2026-09-10）原实现只 `db.delete(o)`，会留下三类孤儿：
+      - `relations`：以该角色为 subject/object 的关系（关系网里指向不存在的人）
+      - `skills`：`owner_id` 指向该角色的技能
+      - `locations.related_ids` / `factions.members` / `factions.leader_id`：JSON/字段里的引用
+    注意 relations/skills 按 `project_id` 一起过滤，避免跨作品误删。
+    """
     o = get_character(db, project_id, character_id)
     if o is None:
         return False
+    name = o.name or ""
+
+    # 1) 关系：两端任一指向该角色即删除
+    db.query(RelationORM).filter_by(project_id=project_id).filter(
+        (RelationORM.subject_id == character_id) | (RelationORM.object_id == character_id)
+    ).delete(synchronize_session=False)
+
+    # 2) 技能：owner_id 指向该角色
+    db.query(SkillORM).filter_by(project_id=project_id, owner_id=character_id).delete(
+        synchronize_session=False)
+
+    # 3) 地点 related_ids / 势力 members·leader_id 里的引用（JSON 列，只能读改写）
+    for loc in db.query(LocationORM).filter_by(project_id=project_id).all():
+        ids = list(loc.related_ids or [])
+        if character_id in ids:
+            loc.related_ids = [x for x in ids if x != character_id]
+    for fac in db.query(FactionORM).filter_by(project_id=project_id).all():
+        if fac.leader_id == character_id:
+            fac.leader_id = None
+        members = list(fac.members or [])
+        kept = [m for m in members if str(m).strip() not in (character_id, name)]
+        if len(kept) != len(members):
+            fac.members = kept
+
     db.delete(o)
     db.commit()
     return True

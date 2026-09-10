@@ -6,6 +6,12 @@
 ---
 
 ## 2026-09-10
+- **Phase 2 收官（2.2 / 2.3 / 2.4 / 2.5 全部完成）+ config-chat 归档**：
+  - **2.4 级联删除补孤儿**（先做，因为会留脏数据）：实测 4 处漏清——删角色后 `relations`（两端任一）/`skills.owner_id`/`locations.related_ids`/`factions.members`+`leader_id` 全指向已删角色；删章后 `chapter_memories` 残留（**危害最大**：后续章节还会把它注入上下文）；删篇漏 `chapter_memories`+`discussion_messages`+`reference_docs`；删卷漏上述全部。已在 `character_crud`/`chapter_crud`/`article_crud`/`volume_crud` 补齐。新增 4 用例（`_seed_four_levels` 造完整四级链），**全量 123 passed**。
+  - **2.2 章节列表接线**：`ChapterListView.vue` 从「规划中」占位重写为真实页面——树形表格（卷→篇→章，复用 `store.structure`，与侧栏同源不重复请求）、关键词搜索（标题+正文）、状态筛选（全部/已写/草稿）、单章改名、单章删除、多选批量删除（逐条 DELETE，失败汇总不影响其余）、「进入」跳对话页。**顺带补了侧栏入口**——该路由原为 `hideTab: true` 且侧栏无菜单项，等于接线完也点不到（与 config-chat 同类问题）。
+  - **2.3 走向卡片补真正的断点**：卡片渲染/落库链路之前已通，但点卡片只在**当前章**线程发消息，而卡片说的是「第 N 章写完、接下来怎么走」——消息落进旧章，作者还得手动切。现 `onPickDirection` 先用 `findNextChapter`（跨篇按 `chapter_no` 取最近下一章）自动切章再发送。
+  - **2.5 对话可中断**：`discussion.js` 两个流函数支持外部 `signal`（与内部超时 controller 合并）；store 新增 `_discussionController` + `stopDiscussion()` + `_appendStreamError()`（停止时保留已流出内容 + `stopped:true`，**不再写「发送失败」红字**）；`ChatInput` 回复中「发送」变「停止生成」；`ChatPanel` 加中性灰尾注。后端 `openai_compat.stream` 读超时 **240s→90s** 并单列超时文案（原来模型卡住要干等 4 分钟）。前端 `vite build` 通过。
+  - **config-chat 归档**：316 行真实功能但侧栏零入口 → `ConfigChatView.vue` 移至 `src/_deprecated/`（附 README 说明复原方式），`router/index.js` 摘掉路由与 import。**能力未丢**：`/角色 /地点` 等斜杠指令 + 自然语言入库已由 `ChatInput.vue` 承载（同调 `commandApi` + `parseSlashCommands`）。
 - **Phase 1 收尾（1.3 / 1.4 / 1.5）**：
   - **1.3** `api/chapter.js:generateChapterStream` 补 `resp.ok` 校验。裸 `fetch` 此前不校验状态码，后端 400/500 返回的是 JSON 错误体（非 SSE），被当事件流解析 → **前端"毫无输出"、真实错误被吞**（记入 04-C13）。现读 `detail/message` 后抛错，并补 `resp.body` 空判断。
   - **1.4** `/validate` 改为显式 **501**。原走 `stubs.validate_settings` 恒返回空 issues = **假绿灯**（界面显示"校验通过、零问题"，比没有更危险）。顺带删除已无调用方的 `stubs.validate_settings` 与前端死代码 `validateApi`。生成链路里的 `validate` SSE 事件（去AI味）未受影响。
