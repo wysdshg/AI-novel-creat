@@ -184,7 +184,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Plus, Files, Delete, Setting, Document, Notebook, Collection,
-  ChatLineRound, DataAnalysis,
+  ChatLineRound, DataAnalysis, TrendCharts,
 } from '@element-plus/icons-vue'
 import { useProjectStore } from '@/store/project'
 import { volumeApi } from '@/api/volume'
@@ -210,6 +210,8 @@ const globalEntries = [
   // Phase 4.1：生成评估（版本留档 / 打分 / 对比）—— 必须有侧栏入口，
   // 否则路由存在但用户点不到（本项目已两次踩过「零入口」的坑，见 06 手册）
   { label: '生成评估', icon: DataAnalysis, name: 'eval' },
+  // Phase 4.2/4.3：观测（用量计量 + 反馈回流）
+  { label: '观测', icon: TrendCharts, name: 'observability' },
 ]
 function goEntry(entry) {
   router.push({ name: entry.name })

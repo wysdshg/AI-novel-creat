@@ -35,6 +35,9 @@ from app.routers import (
     # ——Phase 4.1 最小 eval：生成版本留档 / 打分 / 对比 ——
     # 别名导入：模块名 eval 会遮蔽 Python 内置 eval()，显式改名避免隐患
     eval as eval_router,
+    # ——Phase 4.2/4.3 观测消费端：用量计量 + 反馈回流 ——
+    usage,
+    feedback,
 )
 
 # 统一日志：必须在任何业务模块打日志之前初始化，否则 INFO 级日志会被
@@ -67,6 +70,7 @@ for r in (
     reference_global,                                 # 全局参考资料池
     assist,                                           # AI 辅助能力总入口
     eval_router,                                      # Phase 4.1 最小 eval
+    usage, feedback,                                  # Phase 4.2/4.3 观测消费端
 ):
     app.include_router(r.router, prefix="/api/v1")
 

@@ -13,6 +13,7 @@ import os
 import re
 import threading
 import time
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -24,8 +25,8 @@ from app.core.database import get_session
 from app.core import database as _db
 from app.core.context import build_chapter_messages
 from app.services import (
-    app_config, article_crud, chapter_crud, eval_crud, humanizer, ingestion,
-    model_crud, reference_crud,
+    app_config, article_crud, chapter_crud, eval_crud, feedback_crud, humanizer,
+    ingestion, model_crud, reference_crud, usage_crud,
 )
 from app.core.gateway.registry import get_adapter
 from app.models.orm import ReferenceDocORM, ChapterORM
@@ -458,10 +459,14 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
         messages, ctx_meta = _maybe_load_refs(db, project_id, messages, ctx_meta, default, body)
 
     def event_stream():
-        _t0 = time.time()   # Phase 4.1：为版本留档计总耗时
-        # 这两个变量只在 use_model 分支内被赋值；先置 None，保证留档时能安全取用
+        _t0 = time.time()   # Phase 4.1/4.2：为版本留档与用量计量计总耗时
+        # Phase 4.2：本次生成的链路 id。会写进用量记录 + 日志 + done 事件，
+        # 使「前端看到的那次生成」↔「后台日志」↔「用量明细」三者可以互相对上。
+        _trace_id = uuid.uuid4().hex[:12]
+        # 这几个变量只在 use_model 分支内被赋值；先置 None，保证留档/计量时能安全取用
         report = None
         _temp = None
+        adapter = None
         yield sse_event("start", {"chapter_no": chapter_no})
         yield sse_event("context", ctx_meta)
         if ctx_meta.get("refs_loaded_extra"):
@@ -718,6 +723,30 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[generate_chapter] 版本留档失败（不影响生成）: {type(e).__name__}: {e}")
 
+        # ── Phase 4.2 观测消费端：记录本次模型调用的 token 用量 ──
+        # 流式调用多数厂商不回 usage（last_usage=None）→ 传 prompt/completion 文本，
+        # 由 usage_crud 按字符估算并标 estimated=True，避免把"没数据"记成"零消耗"。
+        try:
+            usage_crud.record_usage(
+                db,
+                scene="chapter",
+                vendor=getattr(default, "vendor", None),
+                model_name=getattr(default, "model_name", None),
+                usage=getattr(adapter, "last_usage", None),
+                project_id=project_id,
+                duration_ms=int((time.time() - _t0) * 1000),
+                ok=not error_notes,
+                trace_id=_trace_id,
+                prompt_text="".join(str(m.get("content") or "") for m in (messages or [])),
+                completion_text=full,
+            )
+            logger.info(
+                f"[generate_chapter] 用量已记录 trace_id={_trace_id} "
+                f"model={getattr(default, 'model_name', None)} 字数={len(full)}"
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[generate_chapter] 用量记录失败（不影响生成）: {type(e).__name__}: {e}")
+
         # 写后摄取：挪到后台线程（独立 DB 会话），不阻塞 SSE。
         # done 立即发出——正文已落库、前端马上显示完成；摄取结果（记忆/摘要/走向）
         # 异步落库，下一章自然读到，作者无需干等。
@@ -741,7 +770,8 @@ def generate_chapter(project_id: str, body: GenerateRequest, db: Session = Depen
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[generate_chapter] 启动后台摄取失败: {e}")
 
-        yield sse_event("done", {"chapter_id": chapter.id, "word_count": chapter.word_count})
+        yield sse_event("done", {"chapter_id": chapter.id, "word_count": chapter.word_count,
+                                 "trace_id": _trace_id})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -782,9 +812,22 @@ def get_chapter(project_id: str, chapter_id: str, db: Session = Depends(get_sess
 
 @router.put("/projects/{project_id}/chapters/{chapter_id}")
 def update_chapter(project_id: str, chapter_id: str, body: ChapterUpdate, db: Session = Depends(get_session)):
+    # Phase 4.3 反馈回流：正文被改动时记一笔（对比 AI 原文）。
+    # 必须先取旧值 —— 更新后就拿不到"作者改之前是什么样"了。
+    before = None
+    if body.content is not None:
+        _old = chapter_crud.get_chapter(db, project_id, chapter_id)
+        if _old is not None:
+            before = _old.content or ""
+
     o = chapter_crud.update_chapter(db, project_id, chapter_id, body)
     if not o:
         return ok({"updated": False, "id": chapter_id})
+
+    if before is not None and (o.content or "") != before:
+        # 旁路：内部已 try/except，失败只少一条记录，不影响保存
+        feedback_crud.record_chapter_edit(db, project_id, chapter_id, before, o.content or "")
+
     return ok(_chapter_to_dict(o))
 
 

@@ -516,3 +516,51 @@ class EvalRecordORM(Base):
     # 预留：将来要多维度（文笔/一致性/设定符合度）时写这里，**无需改表**
     dimensions: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class LlmUsageLogORM(Base):
+    """模型调用用量日志（Phase 4.2 观测消费端，2026-09-10）。
+
+    背景：`trace_id` 此前只出现在响应信封里、**从不落库**；token 用量更是完全没提取。
+    于是「这个月花了多少 token / 哪个场景最费 / 换模型后成本涨了多少」完全无法回答 ——
+    成本治理为零。
+
+    记录时机：每次**真实模型调用**结束时（章节生成 / 商讨 / 写后摄取…）。
+    注意：多数厂商的**流式**响应不回 usage，此时由调用方按字符估算并置 `estimated=True`,
+    以便区分「真实计量」与「估算」—— 不要把"没有数据"记成"零消耗"。
+    """
+    __tablename__ = "llm_usage_logs"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    scene: Mapped[str] = mapped_column(String(40), index=True)  # chapter/discussion/ingest/overview/command
+    vendor: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated: Mapped[bool] = mapped_column(Boolean, default=False)  # True = 按字符估算，非厂商回传
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)          # False = 调用失败（也要计量，失败同样烧钱）
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class FeedbackRecordORM(Base):
+    """反馈回流（Phase 4.3，2026-09-10）。
+
+    记录「作者对 AI 产出做了什么」—— 这是**最强的改进信号**，此前完全被丢弃，
+    导致模型下次照犯同样的错（`docs/01 §7` 记的「反馈闭环 ❌」）。
+
+    当前覆盖 `chapter_edit`（作者修改了 AI 生成的正文）。
+    设计取舍：只存**统计特征与少量样本**，不存改后全文 ——
+    全文已在 `chapters.content` 里，重复存既翻倍占用又容易与正文不一致。
+    """
+    __tablename__ = "feedback_records"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    kind: Mapped[str] = mapped_column(String(40), index=True)   # chapter_edit / direction_rejected …
+    target_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # chapter_id
+    variant_id: Mapped[str | None] = mapped_column(String(36), nullable=True)             # 对照的 AI 版本
+    # 改动统计：{before_len, after_len, ratio, similarity, sample_before, sample_after}
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)

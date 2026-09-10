@@ -100,10 +100,11 @@
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="170" fixed="right">
+        <el-table-column label="操作" width="220" fixed="right">
           <template #default="{ row }">
             <template v-if="row.type === 'chapter'">
               <el-button size="small" text type="primary" @click="openChapter(row)">进入</el-button>
+              <el-button size="small" text type="primary" @click="openContent(row)">正文</el-button>
               <el-button size="small" text type="primary" @click="rename(row)">改名</el-button>
               <el-button size="small" text type="danger" @click="removeOne(row)">删除</el-button>
             </template>
@@ -112,6 +113,34 @@
         </el-table-column>
       </el-table>
     </el-card>
+
+    <!-- 正文查看 / 编辑（Phase 4.3 的前提：没有编辑入口，反馈就无从产生） -->
+    <el-drawer v-model="contentDrawer" size="640px" :title="contentTitle" destroy-on-close>
+      <div v-loading="contentLoading" class="ct-wrap">
+        <el-alert
+          v-if="contentChanged"
+          type="info"
+          :closable="false"
+          show-icon
+          title="已修改"
+          description="保存后系统会记下你改了哪些 —— 这些正是 AI 反复做不好的地方"
+          style="margin-bottom: 10px"
+        />
+        <el-input
+          v-model="contentDraft"
+          type="textarea"
+          :autosize="{ minRows: 18, maxRows: 30 }"
+          placeholder="该章还没有正文"
+        />
+        <div class="ct-foot">
+          <span class="ct-count">{{ (contentDraft || '').length }} 字</span>
+          <el-button size="small" @click="contentDrawer = false">取消</el-button>
+          <el-button size="small" type="primary" :disabled="!contentChanged" @click="saveContent">
+            保存
+          </el-button>
+        </div>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -192,6 +221,46 @@ function onSelectionChange(sel) {
 function openChapter(row) {
   store.selectChapter(row.id)
   router.push({ name: 'chat' })
+}
+
+// ── 正文查看 / 编辑（Phase 4.3 的前提：没有编辑入口，反馈就无从产生）──
+const contentDrawer = ref(false)
+const contentLoading = ref(false)
+const contentTitle = ref('正文')
+const contentDraft = ref('')
+const contentOriginal = ref('')
+const contentChapterId = ref('')
+const contentChanged = computed(() => contentDraft.value !== contentOriginal.value)
+
+async function openContent(row) {
+  contentChapterId.value = row.id
+  contentTitle.value = `${row.label} · 正文`
+  contentDraft.value = ''
+  contentOriginal.value = ''
+  contentDrawer.value = true
+  contentLoading.value = true
+  try {
+    const d = await chapterApi.get(projectId.value, row.id)
+    const text = d?.content || ''
+    contentDraft.value = text
+    contentOriginal.value = text
+  } catch (e) {
+    ElMessage.error('加载正文失败')
+  } finally {
+    contentLoading.value = false
+  }
+}
+
+async function saveContent() {
+  try {
+    // 后端会对比「AI 原文」与本次提交，自动记一笔反馈（Phase 4.3）
+    await chapterApi.update(projectId.value, contentChapterId.value, { content: contentDraft.value })
+    ElMessage.success('已保存')
+    contentDrawer.value = false
+    await store.loadStructure()   // 字数 / 状态列跟着刷新
+  } catch (e) {
+    ElMessage.error('保存失败')
+  }
 }
 
 async function rename(row) {
@@ -287,6 +356,22 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 </script>
 
 <style scoped>
+.ct-wrap {
+  display: flex;
+  flex-direction: column;
+}
+.ct-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 12px;
+}
+.ct-count {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
 .cl { padding: 4px 16px 16px; }
 .cl-toolbar {
   display: flex; align-items: center; justify-content: space-between;

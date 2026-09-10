@@ -63,6 +63,10 @@ class ClaudeAdapter(BaseModelAdapter):
         if status != 200:
             raise RuntimeError(f"模型调用失败(status={status}): {body[:300]}")
         data = json.loads(body)
+        # Phase 4.2：Claude 非流式的用量在顶层（input_tokens / output_tokens）
+        self.last_usage = self.normalize_usage(
+            data.get("usage"), prompt_key="input_tokens", completion_key="output_tokens"
+        )
         return "".join(c.get("text", "") for c in data.get("content", []) if c.get("type") == "text")
 
     def stream(self, messages, **params):
@@ -70,6 +74,10 @@ class ClaudeAdapter(BaseModelAdapter):
         payload["stream"] = True
         url = (self.config.get("api_base", "") or "").rstrip("/") + "/messages"
         req = _build_request(url, payload, self.config.get("api_key", ""))
+        # Phase 4.2：Claude 的用量**分散在两处** —— `message_start` 带 input_tokens、
+        # `message_delta` 带 output_tokens。只取任一处都会丢掉另一半，必须累积。
+        _in_tok = 0
+        _out_tok = 0
         try:
             with urllib.request.urlopen(req, timeout=240) as resp:
                 for raw in resp:
@@ -86,10 +94,22 @@ class ClaudeAdapter(BaseModelAdapter):
                             f"{type(e).__name__}: {e}; data={data[:200]!r}"
                         )
                         continue
+                    _u = obj.get("usage") or (obj.get("message") or {}).get("usage") or {}
+                    if _u.get("input_tokens") is not None:
+                        _in_tok = int(_u["input_tokens"])
+                    if _u.get("output_tokens") is not None:
+                        _out_tok = int(_u["output_tokens"])
                     if obj.get("type") == "content_block_delta":
                         text = obj.get("delta", {}).get("text", "")
                         if text:
                             yield text
+            if _in_tok or _out_tok:
+                self.last_usage = {
+                    "prompt_tokens": _in_tok,
+                    "completion_tokens": _out_tok,
+                    "total_tokens": _in_tok + _out_tok,
+                    "estimated": False,
+                }
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "ignore")
             yield f"\n[模型调用失败 status={e.code}: {detail[:200]}]"

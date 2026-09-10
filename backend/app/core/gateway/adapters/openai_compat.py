@@ -172,6 +172,8 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
             raise RuntimeError(f"模型调用失败(status={status}): {body[:300]}")
         try:
             data = json.loads(body)
+            # Phase 4.2：非流式响应通常带 usage，直接取（流式多数厂商不带）
+            self.last_usage = self.normalize_usage(data.get("usage"))
             msg = data["choices"][0]["message"]
             # content 即正文；reasoning/thinking 是思考过程，不混入正文。
             # 兜底：部分厂商（NVIDIA NIM GLM-5.2）非流式也把正文塞进 reasoning_content/reasoning，
@@ -222,7 +224,15 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
                         break
                     try:
                         obj = json.loads(data)
-                        delta = obj["choices"][0]["delta"]
+                        # Phase 4.2：部分厂商在**流式末帧**带 usage（此时 choices 为空数组）。
+                        # 因此必须先取 usage，再安全地取 choices —— 否则空数组会 IndexError，
+                        # 被下面的容错分支当成"畸形帧"跳过并记 warning（噪音）。
+                        if obj.get("usage"):
+                            self.last_usage = self.normalize_usage(obj["usage"])
+                        choices = obj.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0]["delta"]
                         reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
                         piece = delta.get("content") or ""
                         if piece:
@@ -290,7 +300,13 @@ class OpenAICompatibleAdapter(BaseModelAdapter):
                         break
                     try:
                         obj = json.loads(data)
-                        delta = obj["choices"][0]["delta"]
+                        # 同 stream()：先取 usage，再安全取 choices（末帧 choices 为空）
+                        if obj.get("usage"):
+                            self.last_usage = self.normalize_usage(obj["usage"])
+                        choices = obj.get("choices") or []
+                        if not choices:
+                            continue
+                        delta = choices[0]["delta"]
                         reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
                         piece = delta.get("content") or ""
                         if reasoning:

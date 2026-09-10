@@ -163,6 +163,10 @@ class OllamaNativeAdapter(BaseModelAdapter):
                     if piece:
                         yield piece
                     if obj.get("done"):
+                        # Phase 4.2：Ollama 的用量只在 done 帧（prompt_eval_count / eval_count）
+                        self.last_usage = self.normalize_usage(
+                            obj, prompt_key="prompt_eval_count", completion_key="eval_count"
+                        )
                         break
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "ignore")
@@ -220,6 +224,10 @@ class OllamaNativeAdapter(BaseModelAdapter):
                     if c:
                         yield ("content", c)
                     if obj.get("done"):
+                        # Phase 4.2：用量只在 done 帧
+                        self.last_usage = self.normalize_usage(
+                            obj, prompt_key="prompt_eval_count", completion_key="eval_count"
+                        )
                         break
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "ignore")
@@ -242,6 +250,10 @@ class OllamaNativeAdapter(BaseModelAdapter):
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
+            # Phase 4.2：非流式响应同样带 prompt_eval_count / eval_count
+            self.last_usage = self.normalize_usage(
+                data, prompt_key="prompt_eval_count", completion_key="eval_count"
+            )
             return (data.get("message") or {}).get("content") or ""
         except urllib.error.HTTPError as e:
             raise RuntimeError(f"模型调用失败(status={e.code}): {e.read().decode('utf-8','ignore')[:300]}") from e

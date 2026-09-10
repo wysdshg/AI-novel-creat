@@ -21,6 +21,7 @@ import WorkflowView from '@/views/WorkflowView.vue'       // 全局工作流
 import WorkflowEditorView from '@/views/WorkflowEditorView.vue' // 工作流画布编辑器
 import SkillListView from '@/views/SkillListView.vue'     // 数据库·技能库（按小说隔离的角色技能表）
 import EvalView from '@/views/EvalView.vue'               // Phase 4.1 生成评估（版本留档 / 打分 / 对比）
+import ObservabilityView from '@/views/ObservabilityView.vue'  // Phase 4.2/4.3 观测（用量计量 + 反馈回流）
 
 // =========================================================================
 // 顶部 tab 系统（参考用户大任务截图）
@@ -75,6 +76,9 @@ const routes = [
       // Phase 4.1 生成评估：章节的生成版本留档 / 打分 / 对比。
       // hideTopNav → 不占顶部 tab，靠左侧栏「生成评估」入口进入（入口见 layout/MainLayout.vue）
       { path: 'eval', name: 'eval', component: EvalView, meta: { title: '生成评估', hideTopNav: true } },
+      // Phase 4.2/4.3 观测：用量计量 + 反馈回流（同样靠左侧栏入口进入）
+      { path: 'observability', name: 'observability', component: ObservabilityView,
+        meta: { title: '观测', hideTopNav: true } },
       // 走向推荐（direction）已随模块删除：ingestion 每章推的走向卡片走商讨面板，
       // 不设独立表/页面（2026-09-10，见 docs/03 §1）。
       { path: 'chapters',    name: 'chapters',    component: ChapterListView, meta: { title: '章节列表',   hideTab: true } },
