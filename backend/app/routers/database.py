@@ -12,7 +12,7 @@ from app.core.database import get_session
 from app.services import (
     character_crud, faction_crud, location_crud, relation_crud,
     skill_crud,                              # 本轮升为真实持久化（替换原占位）
-    stubs, config_command,
+    config_command,                          # 已无 stubs 依赖（validate 下架后）
 )
 
 router = APIRouter(tags=["资料库"])
@@ -254,7 +254,20 @@ def location_geo_relations(project_id: str, location_id: str, db: Session = Depe
 # ---------- 设定校验（需求 4） ----------
 @router.post("/projects/{project_id}/validate")
 def validate_settings(project_id: str, body: ValidateRequest):
-    return ok(stubs.validate_settings(project_id, body.model_dump()))
+    """设定校验：**尚未实现**，显式返回 501。
+
+    ⚠️ 这里刻意不是「返回空 issues」。原实现走 `stubs.validate_settings` 恒返回
+    `{"constraint_list": [], "issues": []}`——界面上表现为「校验通过、零问题」，
+    是**假绿灯**：比没有这个功能更危险（作者会以为设定已被检查过）。
+
+    📌 与生成链路里的 `validate` **SSE 事件**无关——那个是活的（去 AI 味 + 字数等
+    确定性扫描，见 chapter.py），本端点下架不影响它。
+    """
+    raise HTTPException(
+        status_code=501,
+        detail="设定校验尚未实现（原实现恒返回空 issues，属假绿灯，已下架）。"
+               "生成时的 AI 味扫描不受影响。",
+    )
 
 
 # ---------- 配置对话：自然语言自动整理资料库（需求 10） ----------

@@ -9,7 +9,6 @@ import WorldMapView from '@/views/WorldMapView.vue'
 import CharacterRelationView from '@/views/CharacterRelationView.vue'
 import ConfigChatView from '@/views/ConfigChatView.vue'
 import ForeshadowView from '@/views/ForeshadowView.vue'
-import DirectionView from '@/views/DirectionView.vue'
 import ChapterListView from '@/views/ChapterListView.vue'
 import TemplateView from '@/views/TemplateView.vue'
 import ModelConfigView from '@/views/ModelConfigView.vue'
@@ -70,7 +69,8 @@ const routes = [
       { path: 'location',    name: 'location',    component: LocationView,    meta: { title: '地点库',     hideTab: true } },
       { path: 'config-chat', name: 'config-chat', component: ConfigChatView, meta: { title: '配置对话',   hideTab: true } },
       { path: 'foreshadow',  name: 'foreshadow',  component: ForeshadowView,  meta: { title: '线索 / 伏笔', hideTab: true } },
-      { path: 'direction',   name: 'direction',   component: DirectionView,   meta: { title: '走向推荐',   hideTab: true } },
+      // 走向推荐（direction）已随模块删除：ingestion 每章推的走向卡片走商讨面板，
+      // 不设独立表/页面（2026-09-10，见 docs/03 §1）。
       { path: 'chapters',    name: 'chapters',    component: ChapterListView, meta: { title: '章节列表',   hideTab: true } },
       { path: 'template',    name: 'template',    component: TemplateView,    meta: { title: '套路模板',   hideTab: true } },
       // 设定库 / 写作 SKILL 与左侧边栏入口同级，进入后不显示顶部 tab（见 #7）

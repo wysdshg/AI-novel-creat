@@ -296,6 +296,18 @@ def ingest_chapter(
         logger.warning(f"[ingestion] 记忆落库失败: {e}")
         result["memory_error"] = str(e)[:200]
 
+    # ---------- 2.6 伏笔回注（Phase 2.1）----------
+    # 补齐「最后一米」：`foreshadow_actions` 此前只存进章级记忆、从不写 `foreshadows` 表，
+    # 导致 AI 每章白抽、`layer_foreshadows` 的读路径永远读不到数据。这里写回。
+    # 幂等（重跑同一章不重复建），失败静默不阻断后续步骤。
+    try:
+        from app.services import foreshadow_crud
+        fs_stats = foreshadow_crud.sync_from_actions(
+            db, project_id, chapter.chapter_no, extracted.get("foreshadow_actions"))
+        result["foreshadow_sync"] = fs_stats
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[ingestion] 伏笔回注失败: {type(e).__name__}: {e}")
+
     # ---------- 3. 篇章摘要写进参考文档（追加，不覆盖） ----------
     if chapter.article_id:
         try:

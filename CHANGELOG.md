@@ -6,6 +6,13 @@
 ---
 
 ## 2026-09-10
+- **Phase 1 收尾（1.3 / 1.4 / 1.5）**：
+  - **1.3** `api/chapter.js:generateChapterStream` 补 `resp.ok` 校验。裸 `fetch` 此前不校验状态码，后端 400/500 返回的是 JSON 错误体（非 SSE），被当事件流解析 → **前端"毫无输出"、真实错误被吞**（记入 04-C13）。现读 `detail/message` 后抛错，并补 `resp.body` 空判断。
+  - **1.4** `/validate` 改为显式 **501**。原走 `stubs.validate_settings` 恒返回空 issues = **假绿灯**（界面显示"校验通过、零问题"，比没有更危险）。顺带删除已无调用方的 `stubs.validate_settings` 与前端死代码 `validateApi`。生成链路里的 `validate` SSE 事件（去AI味）未受影响。
+  - **1.5** 删 `direction` 路由 + `views/DirectionView.vue`（模块已删）；新建 `components/common/PlannedFeature.vue`，把 3 个**假 UI 占位页**（伏笔 / 章节列表 / 套路模板）统一改成诚实的「规划中」页（原先空表格带"查看/备注"按钮、能点的模板卡片，看着像"功能有了只是没数据"）；措辞按事实校准（章节列表是后端已就绪、前端未接线）。前端 `npm run build` 通过。
+- **Phase 2.1 伏笔回注（补齐"最后一米"，闭环贯通）**：新增 `services/foreshadow_crud.py`——`sync_from_actions()` 把每章的 `foreshadow_actions` 回注进 `foreshadows` 表（bury→新建 pending / hint→关联场景 / resolve→标记 done + activated_chapter；模型报了没登记过的回收则建 done 记录留痕）；`ingestion` 新增 **2.6 步**自动回注；7 个伏笔路由从桩转真实（`detect` 保留为显式 501——识别已自动完成）。**关键背景**：`core/context/layers.py:layer_foreshadows` 的读路径早就写好了，只是表里永远没数据——所以补完写入侧，闭环立刻贯通。**踩两个坑并修复**（均记档）：① `session autoflush=False` 下 `add()` 后必须 `flush()`，否则同批后续匹配查不到刚加的记录 → 重复建（04-C14）；② 模糊匹配阈值缺长度门槛：短描述差 1 字比率就 0.833，会把两条独立伏笔并成一条 → 加 `_SIM_MIN_LEN=12` + 阈值 0.85（04-C15）。**单测 15 用例全绿**。**真机闭环验证**：第 1 章生成 → 摄取抽出 2 条伏笔 → 落 `foreshadows`（pending / 埋于第 1 章）→ **第 2 章生成上下文出现【伏笔状态】块并列出这 2 条**。
+- **测试**：单测累计 **119 用例全绿（~9s）**；路由仍 139 条。
+
 - **⚠️ 事故与恢复：沙箱内 `git rebase` 破坏 `.git`（记入 04-A7）**。推送 B 线提交时被拒（远程有用户 13:56 在 GitHub 网页上改的 README 提交 `33c5656`），随后执行 `git rebase` 报 `could not mark as interactive`，`.git/refs/` 目录被抹掉、刚提交的 `d519666` 与新 fetch 的对象一并丢失，git 报 `not a git repository`。**恢复**：备份 `.git` → 重建 `refs/` 目录（git 立刻恢复识别）→ 确认 pack 历史断在 `878ff45` → 以远端为准重建本地仓库（`mv .git .git.corrupt` → `git init` → `fetch` → `update-ref main` → `reset --mixed`）→ 工作区变更完好，重新提交为 `c395a2f` 并推送。**工作区文件全程未受影响**（沙箱只搞 `.git`）。教训已写入 04-A7：沙箱里禁用 `git rebase`、动手前先 `cp -r .git`、push 前先 `ls-remote` 对表、保持随时 push。
 - **B 线工程卫生五项完成（0.2 / 1.1 / 1.2 / B4 / 2.6）**——用户拍板按「1.2 → 1.1 → B4 → B2 → B3」顺序开工，孤儿数据选「清掉」。
   - **1.2 错误提示不得落库成正文**（复核确认仍是活 bug）：新增纯函数 `_can_persist(full, error_notes)`；错误/占位文案改存 `error_notes` 只推前端展示，不再进 `content_parts`；正文为空则不落库、只发 `error` 事件（不发 `saved`）。**顺带修掉一个隐蔽的数据丢失**——原先「重新生成」失败时会把已有章节正文整段覆盖成错误提示。前端补 `error` 事件处理（不误报"生成完成"，留在表单可直接重试）。测试 8（纯函数）+ 2（**真实驱动 SSE 生成器**：必抛异常的假适配器 → 不建章 / 不覆盖原稿）。

@@ -1,21 +1,19 @@
 <template>
-  <div class="stub">
-    <h2 class="stub-title">线索 / 伏笔</h2>
-    <el-alert type="info" :closable="false" show-icon title="伏笔线索全生命周期管理">
-      <p>埋下 → 启用回收，状态追踪。章节生成前置检索可触发伏笔，前端提供伏笔时间轴可视化。</p>
-    </el-alert>
-    <el-empty description="暂无伏笔（功能待实现）" class="stub-empty" />
-    <el-card class="stub-note" shadow="never">
-      <p>后端接口（待实现）：<code>GET /api/v1/projects/{id}/foreshadows</code></p>
-    </el-card>
-  </div>
+  <PlannedFeature
+    title="线索 / 伏笔"
+    summary="伏笔全生命周期管理：埋下 → 追踪 → 回收"
+    detail="当前状态：AI 每章已在抽取伏笔动作（存在章级记忆里），但尚未写入伏笔表，
+      因此这个页面暂时没有数据可展示。后端回注正在 Phase 2.1 推进。"
+    :features="[
+      '伏笔列表 + 时间轴：按章号展示埋设与回收节点',
+      '状态追踪：未埋 / 已埋 / 已回收 / 已废弃',
+      '生成前置检索：本章要点命中未回收伏笔时自动注入提醒',
+      '与章节记忆联动：从 AI 抽取结果自动建伏笔（Phase 2.1）',
+    ]"
+    api="GET /api/v1/projects/{id}/foreshadows（当前为桩，2.1 后转真实）"
+  />
 </template>
 
-<script setup></script>
-
-<style scoped>
-.stub-title { margin: 0 0 16px; }
-.stub-empty { padding: 24px 0; }
-.stub-note { margin-top: 16px; }
-.stub-note code { background: #f4f4f5; padding: 2px 6px; border-radius: 4px; }
-</style>
+<script setup>
+import PlannedFeature from '@/components/common/PlannedFeature.vue'
+</script>

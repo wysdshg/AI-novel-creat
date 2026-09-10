@@ -17,7 +17,7 @@ backend/tests/
 │   ├── probe_pipeline.py     内部管线探针（假模型适配器 + 临时 DB，不碰真实数据）
 │   ├── probe_glm_ms.py       魔搭 GLM 原始 SSE 帧探测（换新模型时先跑这个，key 走环境变量）
 │   └── smoke_startup.py      启动冒烟（路由装配 + 建表 + SKILL 安装）
-├── unit/                ← pytest 单元测试（2026-09-10：104 用例全绿 ~7s）
+├── unit/                ← pytest 单元测试（2026-09-10：119 用例全绿 ~9s）
 │   ├── test_dedup.py         去重反误杀回归（fixtures/ 内 3 份真实轮次文本）
 │   ├── test_humanizer.py     去AI味打分回归
 │   ├── test_smoke.py         路由装配冒烟（import main，零 DB 副作用）
@@ -31,6 +31,7 @@ backend/tests/
 │   ├── test_entity_graph.py   实体图一跳扩展（关系双向/势力归属/掌门/关联地点/上限）
 │   ├── test_chapter_persist_guard.py      1.2 纯函数：正文为空则禁落库
 │   ├── test_chapter_failure_no_persist.py 1.2 集成：真实驱动 SSE 生成器，模型失败不建章/不覆盖
+│   ├── test_foreshadow_sync.py 2.1 伏笔回注：bury/hint/resolve 语义 + 去重幂等 + CRUD
 │   └── fixtures/             ← 测试素材（真实章节文本，勿改）
 └── reports/             ← 测试报告输出（test_full_chain.py 自动写入，可删）
 ```
@@ -58,7 +59,7 @@ backend/tests/
 | 场景 | 跑什么 |
 |---|---|
 | 改了去重 / humanizer / 任何纯函数逻辑 | `pytest tests/unit/`（秒级，必跑） |
-| 改完任何后端代码提交前 | `pytest tests/unit/`（104 用例 ~7s） |
+| 改完任何后端代码提交前 | `pytest tests/unit/`（119 用例 ~9s） |
 | 改了生成链路 / prompt / 解码参数 | `test_full_chain.py`（必跑，看质量指标） |
 | 改了检索（向量/关键词/RRF/rerank/实体图） | `test_retrieval_chain.py`（看 context 事件注入了什么） |
 | 改了按需加载（LOAD_REFS/LOAD_SETTING/目录/两阶段） | `test_on_demand_load.py`（看 refs 事件与答案是否真来自资料） |

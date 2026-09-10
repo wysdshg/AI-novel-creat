@@ -20,6 +20,22 @@ export async function generateChapterStream(projectId, body, onEvent, { signal, 
     body: JSON.stringify(body),
     signal,
   })
+  // ⚠️ 必须显式校验 HTTP 状态：后端在 400/500 时返回的是 JSON 错误体（不是 SSE），
+  // 不校验就会拿它当事件流解析 → 前端只看到"完全没有输出"，错误信息被吞掉（静默失败）。
+  // 典型场景：漏传 article_id 后端返回 400「生成章节必须指定所属篇」。
+  if (!resp.ok) {
+    let detail = ''
+    try {
+      const j = await resp.json()
+      detail = j?.detail || j?.message || ''
+    } catch {
+      /* 错误体不是 JSON 就忽略，用状态码兜底 */
+    }
+    throw new Error(detail || `章节生成接口返回 ${resp.status}`)
+  }
+  if (!resp.body) {
+    throw new Error('章节生成接口未返回数据流')
+  }
   const reader = resp.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''

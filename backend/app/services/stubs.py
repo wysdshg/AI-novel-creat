@@ -35,11 +35,6 @@ def create_character(project_id: str, payload: dict) -> dict:
             "updated_at": datetime.utcnow().isoformat(), **payload}
 
 
-def validate_settings(project_id: str, payload: dict) -> dict:
-    # TODO: 拉取出场实体 → 生成约束清单 → 扫描正文 → 返回 issues
-    return {"constraint_list": [], "issues": []}
-
-
 def run_command(project_id: str, payload: dict) -> dict:
     # TODO: 指令解析引擎（正则+语义识别）→ 路由到对应 CRUD → 可选 dry_run
     return {"intent": None, "changes": [], "clarification": "指令解析引擎待接入"}
@@ -90,21 +85,6 @@ def get_memory_summary(project_id: str) -> dict:
 
 
 # ---------- 伏笔 ----------
-def list_foreshadows(project_id: str, status: str | None = None) -> list:
-    # TODO: 查询 foreshadows 表，可按 status 过滤
-    return []
-
-
-def detect_foreshadows(project_id: str, chapter_id: str) -> list:
-    # TODO: AI 根据章节正文识别新增伏笔
-    return []
-
-
-def get_active_foreshadows(project_id: str) -> list:
-    # TODO: 匹配当前剧情场景，筛出可触发伏笔
-    return []
-
-
 # ---------- 套路模板 ----------
 def list_templates() -> list:
     # TODO: 返回内置模板库（秘境夺宝/宗门大比/…）
