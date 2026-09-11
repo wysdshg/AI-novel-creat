@@ -611,4 +611,10 @@ class ChapterSummaryORM(Base):
     segment_no: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     segment_summary: Mapped[str | None] = mapped_column(Text, nullable=True)  # 段概括（开始/发展/结尾）
     plot_label: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)  # 情节类型标签
+    # —— Phase 7.1 故事弧归并（2026-09-11）——
+    # 段（beat）是"事件粒度"，弧（arc）才是模板需要的单元（一个完整套路 = 一个爽点周期）。
+    # 由 `plot_import.merge_arcs` 用 DeepSeek 归并生成（8B 做不了这种全局叙事理解）。
+    arc_no: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    arc_name: Mapped[str | None] = mapped_column(String(120), nullable=True)   # 如"金手指觉醒"
+    arc_summary: Mapped[str | None] = mapped_column(Text, nullable=True)        # 弧概括（起因→升级→转折→结果）
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

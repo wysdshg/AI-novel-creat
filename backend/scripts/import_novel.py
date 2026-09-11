@@ -32,7 +32,9 @@ def main() -> int:
     ap.add_argument("--book-name", required=True, help="入库用书名（断点续跑的幂等键）")
     ap.add_argument("--start", type=int, default=1)
     ap.add_argument("--end", type=int, default=None)
-    ap.add_argument("--stage", choices=["summarize", "segment", "label", "all"], default="all")
+    ap.add_argument("--stage", choices=["summarize", "segment", "label", "arc", "all"],
+                    default="all",
+                    help="summarize 逐章概括 / segment 情节段 / label 段分类 / arc 故事弧归并 / all 全跑")
     ap.add_argument("--batch", type=int, default=10, help="段切分每批章数")
     ap.add_argument("--batch-summarize", type=int, default=1,
                     help="每 N 章一次概括调用（默认 1=逐章；建议 3 —— 请求数降 1/N，跨章更连贯）")
@@ -65,6 +67,10 @@ def main() -> int:
     if args.stage in ("label", "all"):
         st = pi.label_segments(db, args.book_name, rate=rate)
         print(f"[label] {st}")
+    if args.stage in ("arc", "all"):
+        # 故事弧归并：用 DeepSeek V4.1 Flash（升档模型，需 app_configs.llm.deepseek_key）
+        st = pi.merge_arcs(db, args.book_name, rate=rate)
+        print(f"[arc] {st}")
 
     path = pi.export_report(db, args.book_name, args.out)
     print(f"[report] {path}")

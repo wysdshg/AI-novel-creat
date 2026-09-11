@@ -39,6 +39,11 @@ SF_BASE = "https://api.siliconflow.cn/v1"
 SF_MODEL = "Qwen/Qwen3-8B"
 KEY_CONFIG_KEY = "retrieval.siliconflow_key"
 
+# DeepSeek V4.1 Flash：arc 归并专用（见 merge_arcs 说明）
+DS_BASE = "https://api.deepseek.com"
+DS_MODEL = "deepseek-flash"
+DS_KEY_CONFIG = "llm.deepseek_key"
+
 MIN_INTERVAL_S = 2.0     # 请求最小间隔（防限流）
 MAX_RETRY = 5            # 429/5xx 重试次数
 MAX_CHAPTER_CHARS = 6000 # 送入 LLM 的单章正文上限（一章 3~4k 字足够）
@@ -88,26 +93,18 @@ def sf_key(db: Session) -> str | None:
     return v or None
 
 
-def _sf_post(key: str, user_content: str, *, max_tokens: int = 1024,
-             temperature: float = 0.3, timeout: int = 120,
-             rate: RateLimiter | None = None) -> str:
-    """纯网络调用（**不依赖 db session**）—— 并发路径专用，可在工作线程安全调用。
+def _chat_post(url: str, key: str, body: dict, *, timeout: int,
+               rate: RateLimiter | None = None, label: str = "LLM") -> str:
+    """带限速 + 429/5xx 指数退避的 chat 调用（**厂商无关**，不含 db 依赖）。
 
-    SQLAlchemy Session 非线程安全，所以 Key 由调用方在主线程取好传进来。
+    并发路径专用：Key 由调用方在主线程取好传进来（Session 非线程安全）。
     """
     rate = rate or RateLimiter()
-    body = {
-        "model": SF_MODEL,
-        "messages": [{"role": "user", "content": user_content}],
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "enable_thinking": False,   # Qwen3 系思考默认开：会吃光输出预算并拖慢 60s+
-    }
     last_err: Exception | None = None
     for attempt in range(MAX_RETRY):
         rate.wait()
         req = urllib.request.Request(
-            SF_BASE + "/chat/completions",
+            url,
             data=json.dumps(body).encode(),
             method="POST",
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
@@ -120,21 +117,69 @@ def _sf_post(key: str, user_content: str, *, max_tokens: int = 1024,
             err_body = e.read().decode("utf-8", "ignore")[:200]
             if e.code in (429, 500, 502, 503, 504) and attempt < MAX_RETRY - 1:
                 backoff = 2.0 ** (attempt + 1)
-                logger.warning(f"[plot_import] HTTP {e.code}，{backoff:.0f}s 后重试"
+                logger.warning(f"[plot_import] {label} HTTP {e.code}，{backoff:.0f}s 后重试"
                                f"（{attempt + 1}/{MAX_RETRY}）: {err_body}")
                 time.sleep(backoff)
                 last_err = RuntimeError(f"HTTP {e.code}: {err_body}")
                 continue
-            raise RuntimeError(f"硅基流动 HTTP {e.code}: {err_body}") from e
+            raise RuntimeError(f"{label} HTTP {e.code}: {err_body}") from e
         except Exception as e:
             last_err = e
             if attempt < MAX_RETRY - 1:
                 backoff = 2.0 ** (attempt + 1)
-                logger.warning(f"[plot_import] 请求异常，{backoff:.0f}s 后重试"
+                logger.warning(f"[plot_import] {label} 请求异常，{backoff:.0f}s 后重试"
                                f"（{attempt + 1}/{MAX_RETRY}）: {type(e).__name__}: {e}")
                 time.sleep(backoff)
                 continue
-    raise RuntimeError(f"硅基流动调用失败（重试 {MAX_RETRY} 次）: {last_err}")
+    raise RuntimeError(f"{label} 调用失败（重试 {MAX_RETRY} 次）: {last_err}")
+
+
+def _sf_post(key: str, user_content: str, *, max_tokens: int = 1024,
+             temperature: float = 0.3, timeout: int = 120,
+             rate: RateLimiter | None = None) -> str:
+    """硅基流动 Qwen3-8B（**关闭思考** —— Qwen3 思考默认开会吃光输出预算并拖慢 60s+）。"""
+    body = {
+        "model": SF_MODEL,
+        "messages": [{"role": "user", "content": user_content}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "enable_thinking": False,
+    }
+    return _chat_post(SF_BASE + "/chat/completions", key, body,
+                      timeout=timeout, rate=rate, label="硅基流动")
+
+
+def ds_key(db: Session) -> str | None:
+    """取 DeepSeek Key（app_configs.llm.deepseek_key）。"""
+    from app.services import app_config
+    v = app_config.get(db, DS_KEY_CONFIG, None)
+    if isinstance(v, str):
+        v = v.strip()
+        if v.startswith('"'):
+            try:
+                v = json.loads(v)
+            except Exception:  # noqa: BLE001
+                pass
+    return v or None
+
+
+def _ds_post(key: str, user_content: str, *, max_tokens: int = 3000,
+             temperature: float = 0.2, timeout: int = 300,
+             rate: RateLimiter | None = None) -> str:
+    """DeepSeek V4.1 Flash（**关闭思考**）。
+
+    实测（2026-09-11）：`deepseek-flash` 默认思考开，2000 token 预算全被 reasoning 吃光、
+    content 返回空且耗时 10.7s；加 `thinking={"type":"disabled"}` 后 **1.7s** 拿到完整 JSON。
+    """
+    body = {
+        "model": DS_MODEL,
+        "messages": [{"role": "user", "content": user_content}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "thinking": {"type": "disabled"},
+    }
+    return _chat_post(DS_BASE + "/chat/completions", key, body,
+                      timeout=timeout, rate=rate, label="DeepSeek")
 
 
 def sf_chat(db: Session, user_content: str, **kw) -> str:
@@ -493,48 +538,86 @@ def segment_chapters(db: Session, book_name: str, *, batch: int = 10,
 # 步骤 4：段分类（情节类型标签）
 # ---------------------------------------------------------------------------
 def export_report(db: Session, book_name: str, out_path: str | None = None) -> str:
-    """把处理结果导出为可读 Markdown 报告（按段分组）。返回写入路径。
+    """把处理结果导出为可读 Markdown 报告。返回写入路径。
 
-    供 CLI / 向导页「导出预览」用 —— 也是人工审核段切分质量的主要窗口。
+    结构随数据层级自适应：
+    - **有弧 → 三级**（弧 → 段 → 章）—— 人工审核"弧归并是否合理"的主要窗口；
+    - 无弧 → 段级（旧行为）。
     """
-    from collections import OrderedDict
-
     rows = (
         db.query(ChapterSummaryORM)
         .filter_by(book_name=book_name)
         .order_by(ChapterSummaryORM.chapter_no)
         .all()
     )
-    segs: "OrderedDict[int, dict]" = OrderedDict()
+    # 聚合：arc → segment → chapters（无弧时统一落进 None 桶）
+    arcs: dict = {}
     for r in rows:
-        segs.setdefault(r.segment_no, {"label": None, "summary": None, "chapters": []})
-        segs[r.segment_no]["chapters"].append(r)
+        a = arcs.setdefault(r.arc_no, {"name": None, "summary": None, "segs": {}})
+        if r.arc_name:
+            a["name"] = r.arc_name
+        if r.arc_summary:
+            a["summary"] = r.arc_summary
+        s = a["segs"].setdefault(r.segment_no, {"label": None, "summary": None, "chapters": []})
+        s["chapters"].append(r)
         if r.segment_summary:
-            segs[r.segment_no]["summary"] = r.segment_summary
+            s["summary"] = r.segment_summary
         if r.plot_label:
-            segs[r.segment_no]["label"] = r.plot_label
+            s["label"] = r.plot_label
 
+    n_segs = len({r.segment_no for r in rows})
+    has_arc = any(k is not None for k in arcs)
     out: list[str] = [
         f"# 导入报告 · 《{book_name}》",
         "",
-        f"- 章节：{len(rows)} 章，情节段：{len(segs)} 段（模型 {SF_MODEL}）",
+        f"- 章节：{len(rows)} 章 ｜ 情节段：{n_segs} 段"
+        + (f" ｜ 故事弧：{len([k for k in arcs if k is not None])} 个" if has_arc else ""),
+        f"- 模型：{SF_MODEL}（概括 / 段切分 / 分类）"
+        + (f" + {DS_MODEL}（弧归并）" if has_arc else ""),
         "",
         "---",
         "",
     ]
-    for seg_no, v in segs.items():
-        nos = "、".join(str(r.chapter_no) for r in v["chapters"])
-        seg_label = f"段 {seg_no}" if seg_no is not None else "未分段"
-        out.append(f"## {seg_label} · {v['label'] or '—'}（第 {nos} 章）")
+
+    def emit_seg(s_no, s, prefix: str) -> None:
+        nos = "、".join(str(r.chapter_no) for r in s["chapters"])
+        title = f"段 {s_no}" if s_no is not None else "未分段"
+        out.append(f"{prefix}{title} · {s['label'] or '—'}（第 {nos} 章）")
         out.append("")
-        out.append(f"**段概括**：{v['summary'] or '—'}")
+        out.append(f"**段概括**：{s['summary'] or '—'}")
         out.append("")
-        for r in v["chapters"]:
+        for r in s["chapters"]:
             out.append(f"- **第 {r.chapter_no} 章 {r.title or ''}**：{r.summary}")
         out.append("")
 
+    def _sorted(d: dict):
+        return sorted(d.items(), key=lambda kv: (kv[0] is None, kv[0] or 0))
+
+    if has_arc:
+        for a_no, a in _sorted(arcs):
+            if a_no is None:
+                if not a["segs"]:
+                    continue
+                out.append(f"## 未归弧（{len(a['segs'])} 段）")
+                out.append("")
+                for s_no, s in _sorted(a["segs"]):
+                    emit_seg(s_no, s, "### ")
+                continue
+            chs = [c.chapter_no for s in a["segs"].values() for c in s["chapters"]]
+            rng = f"第 {min(chs)}~{max(chs)} 章" if chs else "—"
+            out.append(f"## 弧 {a_no} · {a['name'] or '—'}（{rng}）")
+            out.append("")
+            out.append(f"**弧概括**：{a['summary'] or '—'}")
+            out.append("")
+            for s_no, s in _sorted(a["segs"]):
+                emit_seg(s_no, s, "### ")
+    else:
+        for s_no, s in _sorted(arcs.get(None, {"segs": {}})["segs"]):
+            emit_seg(s_no, s, "## ")
+
     if out_path is None:
-        root = Path(__file__).resolve().parents[2]      # backend/app/services → 项目根
+        # backend/app/services/plot_import.py → parents[3] = 项目根（[0]=services,[1]=app,[2]=backend）
+        root = Path(__file__).resolve().parents[3]
         out_path = str(root / "outputs" / f"{book_name}-导入报告.md")
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     Path(out_path).write_text("\n".join(out), encoding="utf-8")
@@ -577,3 +660,112 @@ def label_segments(db: Session, book_name: str, *,
         labeled += 1
     db.commit()
     return {"segments": len(segs), "labeled": labeled}
+
+
+# ---------------------------------------------------------------------------
+# 步骤 6：故事弧归并（arc 层 —— 模板真正的候选单元）
+# ---------------------------------------------------------------------------
+def _arc_prompt(seg_list: list[dict]) -> str:
+    """seg_list: [{no, summary, chapters:[...]}]"""
+    lines = [
+        f"段{s['no']}（第 {s['chapters'][0]}~{s['chapters'][-1]} 章）：{s['summary']}"
+        for s in seg_list
+    ]
+    return (
+        f"下面是一部小说连续 {len(seg_list)} 个情节段的概括。请把它们归并为若干「故事弧」。\n"
+        "「故事弧」的定义：一个有完整冲突升级链的故事单元（通常含 2~6 个情节段），\n"
+        "也就是读者感知到的「一个完整套路 / 一个爽点周期」（例如：金手指觉醒、冲突升级与备战、家族危机）。\n\n"
+        "要求：\n"
+        "1. 每个弧输出 150~250 字概括，讲清这条弧的起因 → 升级 → 转折 → 结果；\n"
+        "2. 覆盖全部情节段，不重叠不遗漏；同一个弧里的段号必须连续；\n"
+        "3. 给每个弧起一个 4~8 字的名称。\n\n"
+        "只输出 JSON（不要 markdown 代码块、不要任何额外说明）：\n"
+        '{"arcs":[{"segments":[段号...],"name":"弧名","summary":"概括"}]}\n\n'
+        + "\n".join(lines)
+    )
+
+
+def merge_arcs(db: Session, book_name: str, *, rate: RateLimiter | None = None,
+               max_tokens: int = 3000) -> dict:
+    """把情节段归并为故事弧（Phase 7.1 arc 层，2026-09-11）。
+
+    **为什么需要这一层**：段（beat）是"事件粒度"，而模板需要的单元是"故事弧"
+    （一个完整套路 = 一个爽点周期，8~15 章）。只有段层时，切出来的段"单独看没毛病、
+    但不像一个完整篇章"—— 缺的就是这层归并。
+
+    **模型升档**：Qwen3-8B 做局部概括（机械活）够用，但"看懂全局叙事结构"是强语义任务 →
+    用 DeepSeek V4.1 Flash（输入几千 token，一次几厘钱）。
+
+    幂等：每次重算先清空该书的旧 arc 标记。未覆盖的段兜底归入最后一个弧。
+    """
+    rows = (
+        db.query(ChapterSummaryORM)
+        .filter_by(book_name=book_name)
+        .order_by(ChapterSummaryORM.chapter_no)
+        .all()
+    )
+    rows = [r for r in rows if r.segment_no is not None]
+    if not rows:
+        return {"arcs": 0, "segments": 0, "error": "没有段数据（请先跑 --stage segment）"}
+
+    segs: dict[int, list] = {}
+    for r in rows:
+        segs.setdefault(r.segment_no, []).append(r)
+    seg_list = [
+        {
+            "no": no,
+            "summary": srows[0].segment_summary or "。".join(x.summary for x in srows)[:200],
+            "chapters": [x.chapter_no for x in srows],
+        }
+        for no, srows in sorted(segs.items())
+    ]
+
+    for r in rows:          # 重算前清旧标记
+        r.arc_no = None
+        r.arc_name = None
+        r.arc_summary = None
+    db.commit()
+
+    key = ds_key(db)
+    if not key:
+        raise RuntimeError("未配置 DeepSeek Key（app_configs.llm.deepseek_key）")
+    rate = rate or RateLimiter()
+    raw = _ds_post(key, _arc_prompt(seg_list), max_tokens=max_tokens, rate=rate)
+    data = parse_json_loose(raw) or {}
+    arcs = data.get("arcs") or []
+    if not arcs:
+        logger.warning(f"[plot_import] arc 归并未解析出 JSON（保留段数据不动）: {raw[:160]!r}")
+        return {"arcs": 0, "segments": len(seg_list), "error": "JSON 解析失败"}
+
+    covered: set[int] = set()
+    n_arcs = 0
+    for arc in arcs:
+        seg_nos: list[int] = []
+        for x in arc.get("segments") or []:
+            try:
+                seg_nos.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        name = (arc.get("name") or "").strip()
+        summ = (arc.get("summary") or "").strip()
+        targets = [sn for sn in seg_nos if sn in segs and sn not in covered]
+        if not targets:
+            continue
+        n_arcs += 1
+        for sn in targets:
+            covered.add(sn)
+            for r in segs[sn]:
+                r.arc_no = n_arcs
+                r.arc_name = name or None
+                r.arc_summary = summ or None
+    leftover = [sn for sn in segs if sn not in covered]
+    if leftover:
+        if n_arcs == 0:
+            n_arcs = 1
+        for sn in leftover:          # 兜底：保证全覆盖（否则报告里会丢段）
+            for r in segs[sn]:
+                r.arc_no = n_arcs
+        logger.warning(f"[plot_import] {len(leftover)} 个段未被归并，已兜底归入最后一个弧")
+    db.commit()
+    return {"arcs": n_arcs, "segments": len(seg_list),
+            "covered": len(covered), "leftover": len(leftover)}

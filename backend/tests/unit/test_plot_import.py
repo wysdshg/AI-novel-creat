@@ -268,3 +268,94 @@ class TestBatchSummarize:
         except RuntimeError as e:
             raised = "Key" in str(e)
         assert raised, "无 Key 应明确报错"
+
+
+class TestMergeArcs:
+    """故事弧归并（DeepSeek 升档）：JSON 解析、全覆盖兜底、幂等清旧、无段数据早退。"""
+
+    def _seed(self, test_db, seg_map: dict[int, list[int]]):
+        for seg_no, chapters in seg_map.items():
+            for ch in chapters:
+                test_db.add(pi.ChapterSummaryORM(
+                    id=f"c{ch}", book_name="书", chapter_no=ch, summary=f"第{ch}章概括",
+                    segment_no=seg_no, segment_summary=f"段{seg_no}概括", plot_label="测标签"))
+        test_db.commit()
+
+    def _mock_ds(self, monkeypatch, payload):
+        monkeypatch.setattr(pi, "ds_key", lambda db: "ds-key")
+        monkeypatch.setattr(pi, "_ds_post", lambda k, c, **kw: payload)
+
+    def test_merge_ok(self, test_db, monkeypatch):
+        self._seed(test_db, {1: [1, 2], 2: [3, 4], 3: [5, 6]})
+        self._mock_ds(monkeypatch, json.dumps({"arcs": [
+            {"segments": [1, 2], "name": "觉醒", "summary": "弧一概括"},
+            {"segments": [3], "name": "试炼", "summary": "弧二概括"},
+        ]}, ensure_ascii=False))
+        r = pi.merge_arcs(test_db, "书")
+        assert r["arcs"] == 2 and r["segments"] == 3 and r["leftover"] == 0
+        rows = test_db.query(pi.ChapterSummaryORM).order_by(
+            pi.ChapterSummaryORM.chapter_no).all()
+        assert rows[0].arc_no == 1 and rows[0].arc_name == "觉醒"
+        assert rows[0].arc_summary == "弧一概括"
+        assert rows[2].arc_no == 1          # 段2 与段1 同属弧1
+        assert rows[4].arc_no == 2 and rows[4].arc_name == "试炼"
+
+    def test_uncovered_segments_fallback(self, test_db, monkeypatch):
+        """模型只归并部分段 → 剩余段兜底归入最后一个弧（保证全覆盖、不丢数据）。"""
+        self._seed(test_db, {1: [1], 2: [2], 3: [3]})
+        self._mock_ds(monkeypatch, json.dumps({"arcs": [
+            {"segments": [1], "name": "只归一个", "summary": "s"}]}, ensure_ascii=False))
+        r = pi.merge_arcs(test_db, "书")
+        assert r["leftover"] == 2
+        rows = test_db.query(pi.ChapterSummaryORM).all()
+        assert all(x.arc_no is not None for x in rows)   # 全覆盖
+
+    def test_no_segment_data_early_return(self, test_db, monkeypatch):
+        test_db.add(pi.ChapterSummaryORM(id="a", book_name="书", chapter_no=1, summary="概"))
+        test_db.commit()
+        r = pi.merge_arcs(test_db, "书")
+        assert r["arcs"] == 0 and "error" in r
+
+    def test_bad_json_keeps_segment_data(self, test_db, monkeypatch):
+        self._seed(test_db, {1: [1], 2: [2]})
+        self._mock_ds(monkeypatch, "不是 JSON")
+        r = pi.merge_arcs(test_db, "书")
+        assert r["arcs"] == 0 and "error" in r
+        rows = test_db.query(pi.ChapterSummaryORM).all()
+        assert all(x.segment_no is not None and x.arc_no is None for x in rows)
+
+    def test_remerge_clears_old_arc(self, test_db, monkeypatch):
+        """重算前必须清旧 arc 标记（否则旧弧号残留产生交错）。"""
+        self._seed(test_db, {1: [1], 2: [2]})
+        test_db.query(pi.ChapterSummaryORM).update({"arc_no": 9, "arc_name": "旧的"})
+        test_db.commit()
+        self._mock_ds(monkeypatch, json.dumps({"arcs": [
+            {"segments": [1, 2], "name": "新弧", "summary": "新概括"}]}, ensure_ascii=False))
+        pi.merge_arcs(test_db, "书")
+        rows = test_db.query(pi.ChapterSummaryORM).all()
+        assert all(x.arc_no == 1 and x.arc_name == "新弧" for x in rows)
+
+    def test_no_ds_key_raises(self, test_db, monkeypatch):
+        self._seed(test_db, {1: [1]})
+        monkeypatch.setattr(pi, "ds_key", lambda db: None)
+        try:
+            pi.merge_arcs(test_db, "书")
+            raised = False
+        except RuntimeError as e:
+            raised = "Key" in str(e)
+        assert raised, "无 DeepSeek Key 应明确报错"
+
+
+class TestReportThreeLevels:
+    def test_report_with_arc(self, test_db, tmp_path):
+        test_db.add(pi.ChapterSummaryORM(
+            id="a", book_name="书", chapter_no=1, title="第一章", summary="章概括一",
+            segment_no=1, segment_summary="段概括", plot_label="学院大比",
+            arc_no=1, arc_name="觉醒", arc_summary="弧概括"))
+        test_db.commit()
+        pi.export_report(test_db, "书", str(tmp_path / "r.md"))
+        text = (tmp_path / "r.md").read_text(encoding="utf-8")
+        assert "## 弧 1 · 觉醒" in text
+        assert "### 段 1 · 学院大比" in text
+        assert "**弧概括**：弧概括" in text
+        assert "故事弧：1 个" in text
