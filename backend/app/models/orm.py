@@ -564,3 +564,51 @@ class FeedbackRecordORM(Base):
     # 改动统计：{before_len, after_len, ratio, similarity, sample_before, sample_after}
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class PlotTemplateORM(Base):
+    """情节模板（Phase 7.1，2026-09-11 立项）：从多部小说凝练的**可复用结构骨架**。
+
+    两层粒度：
+    - ``arc``     篇级模板（约 8~15 章），创建篇时挂载；
+    - ``segment`` 情节段模板（1~3 章），乐高件，可拼进任何 arc 空位、也用于卡文救急。
+
+    ``structure`` 的核心是 **beat × variants**：每个节拍挂多本书的不同走法（``src`` 溯源）——
+    模板的价值不是"标准答案"，而是"卡文时这个节拍还有哪几种走法"。
+    **原文永不入库**（版权/体积/检索噪声），只存概括与结构模式。
+
+    向量化：beat 级切块进 ``vector_chunks``（source_type='plot_template'，project_id=__global__），
+    检索复用 A 线 Hybrid 基建 —— 见 ``plot_template_crud.index_template``。
+    """
+    __tablename__ = "plot_templates"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), index=True)
+    scale: Mapped[str] = mapped_column(String(20), index=True, default="arc")  # arc | segment
+    genre_tags: Mapped[list] = mapped_column(JSON, default=list)               # 跨题材同构匹配
+    logline: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # {phases: [{phase, beats: [{beat, variants: [{src, how}]}]}]}
+    structure: Mapped[dict] = mapped_column(JSON, default=dict)
+    pitfalls: Mapped[list] = mapped_column(JSON, default=list)                 # 常见翻车点，规划时提醒
+    rhythm: Mapped[str | None] = mapped_column(String(60), nullable=True)      # 如 "2-3-3-2"
+    source_stats: Mapped[dict] = mapped_column(JSON, default=dict)             # {books, book_names, avg_chapters}
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)  # draft|reviewed|archived
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ChapterSummaryORM(Base):
+    """入库管线的中间产物（Phase 7.1）：爬取小说 → 逐章概括 → 情节段归并。
+
+    本身是**可回溯资产**：凝练 variants、修订模板时需要回到
+    "这段概括来自哪本书的哪几章"。逐章概括落库后支持断点续跑（一本几百次 LLM 调用）。
+    """
+    __tablename__ = "chapter_summaries"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    book_name: Mapped[str] = mapped_column(String(200), index=True)
+    chapter_no: Mapped[int] = mapped_column(Integer, index=True)
+    title: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    summary: Mapped[str] = mapped_column(Text, default="")                    # ~100 字章概括
+    segment_no: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    segment_summary: Mapped[str | None] = mapped_column(Text, nullable=True)  # 段概括（开始/发展/结尾）
+    plot_label: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)  # 情节类型标签
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

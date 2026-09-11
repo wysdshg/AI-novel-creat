@@ -1,0 +1,299 @@
+"""情节模板库（Phase 7.1，2026-09-11）。
+
+三层检索中的前两层（第三层 LLM 扩查留给规划调用方）：
+  1. genre_tags / scale 标签过滤（SQLite，零成本）；
+  2. 向量检索 —— **chunk 粒度 = beat**：篇规划查模板目录，卡文时精确命中
+     "当前节拍其他书的不同走法"（variants）。多查询 RRF 融合（复用 A 线思路）。
+  原文永不入库；向量进 `vector_chunks`（source_type='plot_template'，
+  project_id=`__global__`，与全局资料池同池）→ **检索复用 A 线 Hybrid 基建**。
+
+设计原则：
+- 计量/索引是旁路：向量化失败不影响模板 CRUD（无 key 时纯标签/关键词也能用）；
+- 混合语义（"既像学院大比又像秘境寻宝"）不需要拆 —— 向量空间天然落在两簇之间；
+  用户显式给多个关键词时走 multi-query RRF。
+"""
+import logging
+import uuid
+from datetime import datetime
+
+from sqlalchemy.orm import Session
+
+from app.models.orm import PlotTemplateORM
+from app.services import vector_index
+
+logger = logging.getLogger(__name__)
+
+try:
+    from app.services.reference_crud import GLOBAL_PROJECT_ID as GLOBAL
+except Exception:  # noqa: BLE001 - 防御：循环导入时不炸模块加载
+    GLOBAL = "__global__"
+
+SCALE_ARC = "arc"
+SCALE_SEGMENT = "segment"
+SOURCE_TYPE = "plot_template"
+
+# RRF 常数（与 A 线 pick_relevant 同源）
+RRF_K = 60
+
+
+# ---------------------------------------------------------------------------
+# 结构拍平与检索文本
+# ---------------------------------------------------------------------------
+def structure_beats(t: PlotTemplateORM) -> list[dict]:
+    """把 structure 拍平为 [{phase, beat, variants}]（顺序保持）。"""
+    out: list[dict] = []
+    for ph in (t.structure or {}).get("phases") or []:
+        for b in ph.get("beats") or []:
+            out.append({
+                "phase": ph.get("phase") or "",
+                "beat": b.get("beat") or "",
+                "variants": b.get("variants") or [],
+            })
+    return out
+
+
+def _variants_text(variants: list) -> str:
+    return "；".join(
+        f"（{v.get('src', '?')}）{v.get('how', '')}" for v in variants if isinstance(v, dict)
+    )
+
+
+def beat_chunks(t: PlotTemplateORM) -> list[str]:
+    """beat 级切块（每 beat 一块）—— 向量检索的粒度单位。
+
+    块内自带 模板名/阶段/节拍 上下文，保证单独命中一块时也能看懂语义。
+    """
+    chunks: list[str] = []
+    for b in structure_beats(t):
+        vs = _variants_text(b["variants"])
+        chunk = f"{t.name}｜{b['phase']}｜{b['beat']}" + (f"：{vs}" if vs else "")
+        chunks.append(chunk)
+    return chunks
+
+
+def search_text(t: PlotTemplateORM) -> str:
+    """模板级检索/展示文本（目录用）。"""
+    parts = [t.name, t.logline or "", " ".join(t.genre_tags or [])]
+    for b in structure_beats(t):
+        parts.append(f"{b['phase']}·{b['beat']}：{_variants_text(b['variants'])}")
+    return "\n".join(p for p in parts if p.strip())
+
+
+# ---------------------------------------------------------------------------
+# 向量化（旁路，失败不影响 CRUD）
+# ---------------------------------------------------------------------------
+def index_template(db: Session, t: PlotTemplateORM) -> int:
+    """重建模板向量（先删旧块再建 beat 级块）。返回块数；失败返回 0（静默）。"""
+    try:
+        vector_index.remove_source(db, GLOBAL, SOURCE_TYPE, t.id)
+        n = vector_index.index_chunks(db, GLOBAL, SOURCE_TYPE, t.id, beat_chunks(t))
+        if n:
+            logger.info(f"[plot_tpl] 模板已向量化 name={t.name} beats={n}")
+        return n
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[plot_tpl] 模板向量化失败（不影响保存）: {type(e).__name__}: {e}")
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# CRUD
+# ---------------------------------------------------------------------------
+def _to_dict(t: PlotTemplateORM) -> dict:
+    return {
+        "id": t.id,
+        "name": t.name,
+        "scale": t.scale,
+        "genre_tags": t.genre_tags or [],
+        "logline": t.logline,
+        "structure": t.structure or {},
+        "pitfalls": t.pitfalls or [],
+        "rhythm": t.rhythm,
+        "source_stats": t.source_stats or {},
+        "status": t.status,
+        "created_at": t.created_at.isoformat() if t.created_at else None,
+    }
+
+
+def create(db: Session, data: dict) -> PlotTemplateORM:
+    o = PlotTemplateORM(
+        id=uuid.uuid4().hex,
+        name=data.get("name") or "未命名模板",
+        scale=data.get("scale") or SCALE_ARC,
+        genre_tags=data.get("genre_tags") or [],
+        logline=data.get("logline"),
+        structure=data.get("structure") or {},
+        pitfalls=data.get("pitfalls") or [],
+        rhythm=data.get("rhythm"),
+        source_stats=data.get("source_stats") or {},
+        status=data.get("status") or "draft",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(o)
+    db.commit()
+    db.refresh(o)
+    index_template(db, o)
+    return o
+
+
+def update(db: Session, template_id: str, data: dict) -> PlotTemplateORM | None:
+    o = db.query(PlotTemplateORM).filter_by(id=template_id).first()
+    if o is None:
+        return None
+    for k in ("name", "scale", "genre_tags", "logline", "structure",
+              "pitfalls", "rhythm", "source_stats", "status"):
+        if k in data and data[k] is not None:
+            setattr(o, k, data[k])
+    o.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(o)
+    index_template(db, o)   # 结构变了 → 重建向量
+    return o
+
+
+def get(db: Session, template_id: str) -> PlotTemplateORM | None:
+    return db.query(PlotTemplateORM).filter_by(id=template_id).first()
+
+
+def list_templates(db: Session, *, scale: str | None = None,
+                   status: str | None = None) -> list[dict]:
+    q = db.query(PlotTemplateORM)
+    if scale:
+        q = q.filter(PlotTemplateORM.scale == scale)
+    if status:
+        q = q.filter(PlotTemplateORM.status == status)
+    rows = q.order_by(PlotTemplateORM.updated_at.desc()).all()
+    return [_to_dict(t) for t in rows]
+
+
+def delete(db: Session, template_id: str) -> bool:
+    o = db.query(PlotTemplateORM).filter_by(id=template_id).first()
+    if o is None:
+        return False
+    vector_index.remove_source(db, GLOBAL, SOURCE_TYPE, template_id)
+    db.delete(o)
+    db.commit()
+    return True
+
+
+# ---------------------------------------------------------------------------
+# 检索（层 1 标签过滤 + 层 2 向量 multi-query RRF；层 3 LLM 扩查留给调用方）
+# ---------------------------------------------------------------------------
+def _tag_filter(db: Session, scale: str | None, tags: list[str]) -> list[PlotTemplateORM]:
+    q = db.query(PlotTemplateORM)
+    if scale:
+        q = q.filter(PlotTemplateORM.scale == scale)
+    rows = q.all()
+    if not tags:
+        return rows
+    want = {t.strip().lower() for t in tags if t.strip()}
+    out = []
+    for r in rows:
+        have = {str(x).strip().lower() for x in (r.genre_tags or [])}
+        # 标签语义：模板命中任一标签即可（过滤，非打分）
+        if have & want:
+            out.append(r)
+    return out
+
+
+def _keyword_filter(db: Session, query: str, scale: str | None,
+                    rows: list[PlotTemplateORM]) -> list[dict]:
+    """向量不可用时的兜底：名称/logline/beat 文本关键词匹配。"""
+    kws = [w for w in (query or "").replace("，", " ").replace(",", " ").split() if w]
+    scored: list[tuple[float, PlotTemplateORM, list[dict]]] = []
+    for t in rows:
+        if scale and t.scale != scale:
+            continue
+        hits: list[dict] = []
+        score = 0.0
+        text_all = search_text(t)
+        for kw in kws:
+            if kw in t.name or kw in (t.logline or ""):
+                score += 5.0
+            for b in structure_beats(t):
+                blob = f"{b['phase']}·{b['beat']}：{_variants_text(b['variants'])}"
+                if kw in blob:
+                    score += 1.0
+                    hits.append(b)
+        if score > 0 and kws:
+            # name/logline 命中而 beat 未命中 → 视为"目录级命中"，带上全部 beats
+            # （关键词匹配的是模板名，作者关心的仍是该模板的节拍与走法）
+            beats_out = hits if hits else structure_beats(t)
+            scored.append((score, t, beats_out))
+    scored.sort(key=lambda x: -x[0])
+    return [
+        {**_to_dict(t), "matched_beats": hits, "_score": s}
+        for s, t, hits in scored[:8]
+    ]
+
+
+def search(db: Session, *, query: str, queries: list[str] | None = None,
+           scale: str | None = None, tags: list[str] | None = None,
+           top_k: int = 8) -> dict:
+    """模板检索主入口。
+
+    - `query` 一句模糊口述即可；`queries` 显式多查询（如 ["学院大比","秘境寻宝"]），
+      多路各查 beat 级 chunks 后 RRF 融合；
+    - 无向量能力时自动回退关键词匹配（`mode=fallback`），**不硬报错**；
+    - 返回模板 + 其被命中的 beats（卡文场景直接看 variants）。
+    """
+    q_list = [q for q in ([query] + list(queries or [])) if q and q.strip()]
+    pool = _tag_filter(db, scale, tags or [])
+
+    use_vector = vector_index.enabled(db) and q_list
+    if not use_vector:
+        items = _keyword_filter(db, query or " ".join(queries or []), scale, pool)
+        return {"mode": "fallback_tags", "queries": q_list, "items": items}
+
+    # --- multi-query 向量检索，beat 级 RRF 融合 ---
+    beat_rrf: dict[tuple[str, str], float] = {}   # (template_id, beat_text) -> rrf 分
+    for q in q_list:
+        hits = vector_index.search_similar(db, GLOBAL, SOURCE_TYPE, q, top_k=top_k * 3)
+        if not hits:
+            continue
+        # 相对阈值：相似度分数量纲随实现不同（brute=余弦，sqlite-vec=1/(1+L2)），
+        # 但**同一查询内**的相对比例可比。只吸收与该查询 top1 相比 >= 30% 的命中 ——
+        # 滤掉正交/远距噪声，避免不相关模板混进 RRF 尾部（2026-09-11 单测实测发现）。
+        thresh = hits[0].score * 0.3
+        kept = [h for h in hits if h.score >= thresh]
+        for rank, h in enumerate(kept):
+            key = (h.source_id, h.chunk_text)
+            beat_rrf.setdefault(key, 0.0)
+            beat_rrf[key] += 1.0 / (RRF_K + rank + 1)
+
+    if not beat_rrf:
+        items = _keyword_filter(db, query or " ".join(q_list), scale, pool)
+        return {"mode": "fallback_tags", "queries": q_list, "items": items}
+
+    # 聚合到模板：模板分 = 其 beat 的最优 RRF；同时收集每个模板的 matched beats
+    by_template: dict[str, dict] = {}
+    for (tid, _chunk), s in sorted(beat_rrf.items(), key=lambda x: -x[1]):
+        by_template.setdefault(tid, {"best": 0.0, "beats": []})
+        if s > by_template[tid]["best"]:
+            by_template[tid]["best"] = s
+
+    items: list[dict] = []
+    for tid, info in by_template.items():
+        t = get(db, tid)
+        if t is None:
+            continue
+        if scale and t.scale != scale:
+            continue
+        if tags:
+            have = {str(x).strip().lower() for x in (t.genre_tags or [])}
+            want = {x.strip().lower() for x in tags}
+            if not (have & want):
+                continue
+        # 收集该模板被命中的 beat（按 RRF 排序，去重）
+        beats = []
+        for (btid, _chunk), s in sorted(beat_rrf.items(), key=lambda x: -x[1]):
+            if btid != tid:
+                continue
+            for b in structure_beats(t):
+                key_txt = f"{t.name}｜{b['phase']}｜{b['beat']}"
+                if _chunk.startswith(key_txt) and b not in beats:
+                    beats.append(b)
+        items.append({**_to_dict(t), "matched_beats": beats[:6], "_score": round(info["best"], 6)})
+
+    items.sort(key=lambda x: -x["_score"])
+    return {"mode": "vector", "queries": q_list, "items": items[:top_k]}
