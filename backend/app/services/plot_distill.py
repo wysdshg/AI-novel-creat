@@ -16,6 +16,8 @@
 **人工确认**：本模块产出的一律是 `draft`；审核通过由人改 `status="reviewed"`（或删除）。
 """
 import logging
+from pathlib import Path
+
 from sqlalchemy.orm import Session
 
 from app.models.orm import ChapterSummaryORM, PlotTemplateORM
@@ -257,3 +259,59 @@ def distill_all(db: Session, *, book_names: list[str] | None = None,
             failed.append({"group": g["suggest_name"], "reason": f"{type(e).__name__}: {e}"})
     return {"groups": len(groups), "created": len(created),
             "templates": created, "failed": failed}
+
+
+# ---------------------------------------------------------------------------
+# 5. 审核报告（人工确认 draft 模板的主要窗口）
+# ---------------------------------------------------------------------------
+def export_template_report(db: Session, out_path: str | None = None,
+                           status: str | None = "draft") -> str:
+    """导出模板审核报告（Markdown）。`status=None` 导出全部。
+
+    审核动作（在 API / 将来 UI 上做）：满意的改 `status="reviewed"`，不要的删除。
+    """
+    q = db.query(PlotTemplateORM)
+    if status:
+        q = q.filter_by(status=status)
+    rows = q.order_by(PlotTemplateORM.updated_at.desc()).all()
+
+    out: list[str] = [
+        f"# 模板审核报告（{len(rows)} 个 · status={status or '全部'}）",
+        "",
+        "> 审核：满意的把 `status` 改为 `reviewed`（`PUT /plot-templates/{{id}}`），不要的直接删除。",
+        "> draft 模板在下次 `distill` 跑批时会被清理重建，reviewed 的不受影响。",
+        "",
+        "---",
+        "",
+    ]
+    for t in rows:
+        src = t.source_stats or {}
+        out.append(f"## {t.name}")
+        out.append("")
+        out.append(f"- **一句话**：{t.logline or '—'}")
+        out.append(f"- **标签**：{'、'.join(t.genre_tags or []) or '—'}　**节奏**：{t.rhythm or '—'}")
+        out.append(f"- **来源**：{src.get('books', 0)} 本书（{'、'.join(src.get('book_names') or []) or '—'}）"
+                   f"　`id={t.id[:8]}`")
+        for ph in (t.structure or {}).get("phases") or []:
+            out.append("")
+            out.append(f"### 阶段 · {ph.get('phase') or '—'}")
+            out.append("")
+            for b in ph.get("beats") or []:
+                vs = "；".join(
+                    f"**{v.get('src', '?')}**：{v.get('how', '')}"
+                    for v in (b.get("variants") or []) if isinstance(v, dict)
+                )
+                out.append(f"- **{b.get('beat') or '—'}** → {vs or '—'}")
+        if t.pitfalls:
+            out.append("")
+            out.append("**常见翻车点**：" + "；".join(t.pitfalls))
+        out.append("")
+        out.append("---")
+        out.append("")
+
+    if out_path is None:
+        root = Path(__file__).resolve().parents[3]      # backend/app/services → 项目根
+        out_path = str(root / "outputs" / "模板审核报告.md")
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_path).write_text("\n".join(out), encoding="utf-8")
+    return out_path

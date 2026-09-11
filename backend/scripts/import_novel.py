@@ -70,6 +70,8 @@ def main() -> int:
             print(f"   · {t['name']}（{t['arcs']} 弧 / {len(t['books'])} 书 / 相似度 {t['avg_sim']}）")
         for f in st["failed"]:
             print(f"   ✗ {f['group']}: {f['reason']}")
+        path = plot_distill.export_template_report(db)
+        print(f"[report] {path}")
         print(f"[done] {time.time() - t0:.0f}s")
         db.close()
         return 0
