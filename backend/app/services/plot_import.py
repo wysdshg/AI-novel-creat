@@ -284,6 +284,55 @@ def segment_chapters(db: Session, book_name: str, *, batch: int = 10,
 # ---------------------------------------------------------------------------
 # 步骤 4：段分类（情节类型标签）
 # ---------------------------------------------------------------------------
+def export_report(db: Session, book_name: str, out_path: str | None = None) -> str:
+    """把处理结果导出为可读 Markdown 报告（按段分组）。返回写入路径。
+
+    供 CLI / 向导页「导出预览」用 —— 也是人工审核段切分质量的主要窗口。
+    """
+    from collections import OrderedDict
+
+    rows = (
+        db.query(ChapterSummaryORM)
+        .filter_by(book_name=book_name)
+        .order_by(ChapterSummaryORM.chapter_no)
+        .all()
+    )
+    segs: "OrderedDict[int, dict]" = OrderedDict()
+    for r in rows:
+        segs.setdefault(r.segment_no, {"label": None, "summary": None, "chapters": []})
+        segs[r.segment_no]["chapters"].append(r)
+        if r.segment_summary:
+            segs[r.segment_no]["summary"] = r.segment_summary
+        if r.plot_label:
+            segs[r.segment_no]["label"] = r.plot_label
+
+    out: list[str] = [
+        f"# 导入报告 · 《{book_name}》",
+        "",
+        f"- 章节：{len(rows)} 章，情节段：{len(segs)} 段（模型 {SF_MODEL}）",
+        "",
+        "---",
+        "",
+    ]
+    for seg_no, v in segs.items():
+        nos = "、".join(str(r.chapter_no) for r in v["chapters"])
+        seg_label = f"段 {seg_no}" if seg_no is not None else "未分段"
+        out.append(f"## {seg_label} · {v['label'] or '—'}（第 {nos} 章）")
+        out.append("")
+        out.append(f"**段概括**：{v['summary'] or '—'}")
+        out.append("")
+        for r in v["chapters"]:
+            out.append(f"- **第 {r.chapter_no} 章 {r.title or ''}**：{r.summary}")
+        out.append("")
+
+    if out_path is None:
+        root = Path(__file__).resolve().parents[2]      # backend/app/services → 项目根
+        out_path = str(root / "outputs" / f"{book_name}-导入报告.md")
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_path).write_text("\n".join(out), encoding="utf-8")
+    return out_path
+
+
 def label_segments(db: Session, book_name: str, *,
                    rate: RateLimiter | None = None) -> dict:
     """给每个情节段打情节类型标签（4~8 字），写回该段全部章的 plot_label。"""

@@ -152,3 +152,32 @@ class TestLabel:
         monkeypatch.setattr(pi, "sf_chat", fake)
         r = pi.label_segments(test_db, "书")
         assert r["labeled"] == 0    # 失败跳过，不影响其他段
+
+
+class TestExportReport:
+    def test_report_written(self, test_db, tmp_path):
+        test_db.add(pi.ChapterSummaryORM(id="a", book_name="书", chapter_no=1,
+                                         title="第一章", summary="概一",
+                                         segment_no=1, segment_summary="段概",
+                                         plot_label="学院大比"))
+        test_db.add(pi.ChapterSummaryORM(id="b", book_name="书", chapter_no=2,
+                                         title="第二章", summary="概二",
+                                         segment_no=1, segment_summary="段概",
+                                         plot_label="学院大比"))
+        test_db.commit()
+        out = tmp_path / "report.md"
+        path = pi.export_report(test_db, "书", str(out))
+        text = out.read_text(encoding="utf-8")
+        assert path == str(out)
+        assert "段 1 · 学院大比（第 1、2 章）" in text
+        assert "概一" in text and "概二" in text
+        assert "第一章" in text
+
+    def test_report_no_segment(self, test_db, tmp_path):
+        """没跑段切分时也要能导出（显示「未分段」，不炸）。"""
+        test_db.add(pi.ChapterSummaryORM(id="a", book_name="书", chapter_no=1, summary="概"))
+        test_db.commit()
+        path = pi.export_report(test_db, "书", str(tmp_path / "r.md"))
+        text = (tmp_path / "r.md").read_text(encoding="utf-8")
+        assert path.endswith("r.md")
+        assert "概" in text and "未分段" in text
