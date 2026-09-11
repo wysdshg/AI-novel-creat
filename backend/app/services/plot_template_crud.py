@@ -59,7 +59,7 @@ def _variants_text(variants: list) -> str:
 
 
 def beat_chunks(t: PlotTemplateORM) -> list[str]:
-    """beat 级切块（每 beat 一块）—— 向量检索的粒度单位。
+    """beat 级切块（每 beat 一块）—— 卡文场景的精确检索粒度。
 
     块内自带 模板名/阶段/节拍 上下文，保证单独命中一块时也能看懂语义。
     """
@@ -68,6 +68,22 @@ def beat_chunks(t: PlotTemplateORM) -> list[str]:
         vs = _variants_text(b["variants"])
         chunk = f"{t.name}｜{b['phase']}｜{b['beat']}" + (f"：{vs}" if vs else "")
         chunks.append(chunk)
+    return chunks
+
+
+def template_chunks(t: PlotTemplateORM) -> list[str]:
+    """向量化用的**全部**切块 = 1 个模板级块 + N 个 beat 级块。
+
+    为什么必须有模板级块（2026-09-11 实测）：
+    只索引 beat 块时，块的语义被"具体情节"主导，而模板名/logline/标签（如"金手指觉醒"）
+    在 beat 文本里权重很低 → 模糊口述（"主角觉醒金手指"）反而召不回该模板
+    （实测排序把"夺舍觉醒"排到了最后）。模板级块把 name + logline + 标签 + 各 beat 标题
+    聚成一个块，正好代表"这个套路是什么"。
+    """
+    head = f"{t.name}｜{t.logline or ''}｜标签：{'、'.join(t.genre_tags or [])}"
+    beats_head = "；".join(f"{b['phase']}·{b['beat']}" for b in structure_beats(t))
+    chunks = [head + (f"｜节拍：{beats_head}" if beats_head else "")]
+    chunks.extend(beat_chunks(t))
     return chunks
 
 
@@ -83,10 +99,10 @@ def search_text(t: PlotTemplateORM) -> str:
 # 向量化（旁路，失败不影响 CRUD）
 # ---------------------------------------------------------------------------
 def index_template(db: Session, t: PlotTemplateORM) -> int:
-    """重建模板向量（先删旧块再建 beat 级块）。返回块数；失败返回 0（静默）。"""
+    """重建模板向量（先删旧块再建 模板级 + beat 级块）。返回块数；失败返回 0（静默）。"""
     try:
         vector_index.remove_source(db, GLOBAL, SOURCE_TYPE, t.id)
-        n = vector_index.index_chunks(db, GLOBAL, SOURCE_TYPE, t.id, beat_chunks(t))
+        n = vector_index.index_chunks(db, GLOBAL, SOURCE_TYPE, t.id, template_chunks(t))
         if n:
             logger.info(f"[plot_tpl] 模板已向量化 name={t.name} beats={n}")
         return n

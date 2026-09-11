@@ -6,6 +6,14 @@
 ---
 
 ## 2026-09-11
+- **Phase 7.1 模板凝练落地（弧 → plot_templates，5 个种子模板）**：
+  - 新增 `services/plot_distill.py`：`cluster_arcs`（bge-m3 向量聚类弧 = AI 候选组）→ `distill_template`（DeepSeek 凝练成 phase→beat→variants）→ `distill_all`（一键：聚类 + 凝练 + 入库）。
+  - 落实"**AI 出候选组 + 用户确认**"：产出一律 `status="draft"`；`replace_drafts=True` 重建时清旧 draft（**reviewed 不动**，防重复堆积）。
+  - 真机（修真四万年 5 弧）：**5 个种子模板入库**。结构质量达标 —— "夺舍觉醒"含 4 阶段 / 10 节拍 / variants 溯源 + 4 条实用 pitfalls（如"梦境历练篇幅过长，现实主线停滞"）。
+  - **修一个检索排序缺陷**：只索引 beat 块时，模板名/logline/标签的语义被具体情节稀释 → 模糊口述"主角觉醒金手指"竟把该模板排到**最后**。加**模板级块**（name + logline + 标签 + 各 beat 标题）后排序修正（同样 query 升到第一）。
+  - 凝练含**重试一次**（LLM 偶发格式问题：实测救回 1/5 组）+ 失败带 raw 片段（便于排查，不再只丢一句"缺字段"）。
+  - CLI 新增 `--stage distill`（同时把 `--book-dir/--book-name` 改为可选，distill 时省略 = 全部书）。
+  - 单测 14 例；全量单测全绿。
 - **Phase 7.1 弧归并层落地（DeepSeek V4.1 Flash，19 段 → 5 弧）**：
   - **背景**：用户察觉"切出来的段不像完整篇章"→ 诊断确认**粒度错位**：段（beat）是事件粒度，模板需要的单元是**故事弧**（一个完整套路 = 一个爽点周期）。缺的就是这层归并。
   - `merge_arcs()`：读段序列 → DeepSeek 归并 → 写回 `chapter_summaries.arc_no/arc_name/arc_summary`；未覆盖的段兜底归入最后一个弧（保证全覆盖）。

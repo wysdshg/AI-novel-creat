@@ -27,15 +27,22 @@ from app.services import plot_import as pi                 # noqa: E402
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="小说 → 概括 → 情节段 → 分类 → 报告")
-    ap.add_argument("--book-dir", required=True, help="小说章节目录（形如 0001_标题.txt）")
-    ap.add_argument("--book-name", required=True, help="入库用书名（断点续跑的幂等键）")
+    ap = argparse.ArgumentParser(description="小说 → 概括 → 情节段 → 分类 → 故事弧 → 报告 / 模板凝练")
+    ap.add_argument("--book-dir", default=None, help="小说章节目录（形如 0001_标题.txt）")
+    ap.add_argument("--book-name", default=None,
+                    help="入库用书名（断点续跑的幂等键）；distill 阶段省略 = 对全部书凝练")
     ap.add_argument("--start", type=int, default=1)
     ap.add_argument("--end", type=int, default=None)
-    ap.add_argument("--stage", choices=["summarize", "segment", "label", "arc", "all"],
+    ap.add_argument("--stage",
+                    choices=["summarize", "segment", "label", "arc", "distill", "all"],
                     default="all",
-                    help="summarize 逐章概括 / segment 情节段 / label 段分类 / arc 故事弧归并 / all 全跑")
+                    help="summarize 逐章概括 / segment 情节段 / label 段分类 / arc 故事弧 / "
+                         "distill 凝练模板（跨书，需已有弧数据）/ all 前四步+报告")
     ap.add_argument("--batch", type=int, default=10, help="段切分每批章数")
+    ap.add_argument("--threshold", type=float, default=0.80,
+                    help="弧聚类相似度阈值（distill 用，越大越保守）")
+    ap.add_argument("--min-arcs", type=int, default=1,
+                    help="成组最少弧数（distill 用；设 2 = 只要跨书/跨弧的套路）")
     ap.add_argument("--batch-summarize", type=int, default=1,
                     help="每 N 章一次概括调用（默认 1=逐章；建议 3 —— 请求数降 1/N，跨章更连贯）")
     ap.add_argument("--concurrency", type=int, default=1,
@@ -44,10 +51,28 @@ def main() -> int:
     ap.add_argument("--out", default=None, help="报告输出路径（默认 outputs/<书名>-导入报告.md）")
     args = ap.parse_args()
 
+    # 校验：除 distill（跨书凝练）外，其余阶段都必须指定书
+    if args.stage != "distill" and not (args.book_dir and args.book_name):
+        ap.error("--book-dir 与 --book-name 在 summarize/segment/label/arc/all 阶段必填")
+
     dbmod.init_db()
     db = dbmod.SessionLocal()
     rate = pi.RateLimiter(args.interval)
     t0 = time.time()
+
+    if args.stage == "distill":
+        from app.services import plot_distill
+        st = plot_distill.distill_all(
+            db, book_names=[args.book_name] if args.book_name else None,
+            threshold=args.threshold, min_arcs=args.min_arcs)
+        print(f"[distill] {st['groups']} 组 → 入库 {st['created']} 个模板（draft 待人工审核）")
+        for t in st["templates"]:
+            print(f"   · {t['name']}（{t['arcs']} 弧 / {len(t['books'])} 书 / 相似度 {t['avg_sim']}）")
+        for f in st["failed"]:
+            print(f"   ✗ {f['group']}: {f['reason']}")
+        print(f"[done] {time.time() - t0:.0f}s")
+        db.close()
+        return 0
 
     if args.stage in ("summarize", "all"):
         if args.batch_summarize > 1 or args.concurrency > 1:
