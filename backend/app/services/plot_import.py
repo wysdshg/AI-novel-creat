@@ -738,7 +738,7 @@ def _arc_prompt(seg_list: list[dict]) -> str:
         "「故事弧」的定义：一个有完整冲突升级链的故事单元（通常含 2~6 个情节段），\n"
         "也就是读者感知到的「一个完整套路 / 一个爽点周期」（例如：金手指觉醒、冲突升级与备战、家族危机）。\n\n"
         "要求：\n"
-        "1. 每个弧输出 150~250 字概括，讲清这条弧的起因 → 升级 → 转折 → 结果；\n"
+        "1. 每个弧输出 80~150 字概括，讲清这条弧的起因 → 升级 → 转折 → 结果；\n"
         "2. 覆盖全部情节段，不重叠不遗漏；同一个弧里的段号必须连续；\n"
         "3. 给每个弧起一个 4~8 字的名称。\n\n"
         "只输出 JSON（不要 markdown 代码块、不要任何额外说明）：\n"
@@ -748,7 +748,7 @@ def _arc_prompt(seg_list: list[dict]) -> str:
 
 
 def merge_arcs(db: Session, book_name: str, *, rate: RateLimiter | None = None,
-               max_tokens: int = 3000) -> dict:
+               max_tokens: int = 16000, chunk: int = 120) -> dict:
     """把情节段归并为故事弧（Phase 7.1 arc 层，2026-09-11）。
 
     **为什么需要这一层**：段（beat）是"事件粒度"，而模板需要的单元是"故事弧"
@@ -792,12 +792,25 @@ def merge_arcs(db: Session, book_name: str, *, rate: RateLimiter | None = None,
     if not key:
         raise RuntimeError("未配置 DeepSeek Key（app_configs.llm.deepseek_key）")
     rate = rate or RateLimiter()
-    raw = _ds_post(key, _arc_prompt(seg_list), max_tokens=max_tokens, rate=rate)
-    data = parse_json_loose(raw) or {}
-    arcs = data.get("arcs") or []
+
+    # 分批归并：段数多了单次输出会超过 max_tokens 被**截断** → JSON 解析失败
+    # （2026-09-11 实测教训：斗破 84 段一次归并，max_tokens=3000 直接截断，arcs 全丢）
+    batches = [seg_list[i:i + max(1, chunk)] for i in range(0, len(seg_list), max(1, chunk))]
+    arcs: list[dict] = []
+    raws: list[str] = []
+    for b in batches:
+        raw = _ds_post(key, _arc_prompt(b), max_tokens=max_tokens, rate=rate)
+        raws.append(raw)
+        got = (parse_json_loose(raw) or {}).get("arcs") or []
+        if not got:
+            logger.warning(f"[plot_import] arc 归并批次（段 {b[0]['no']}~{b[-1]['no']}）"
+                           f"未解析出 JSON: {raw[:150]!r}")
+        arcs.extend(got)
     if not arcs:
-        logger.warning(f"[plot_import] arc 归并未解析出 JSON（保留段数据不动）: {raw[:160]!r}")
-        return {"arcs": 0, "segments": len(seg_list), "error": "JSON 解析失败"}
+        logger.warning(f"[plot_import] arc 归并整体未解析出 JSON（段数据保留不动）: "
+                       f"{raws[0][:160]!r}" if raws else "")
+        return {"arcs": 0, "segments": len(seg_list), "error": "JSON 解析失败",
+                "raw_head": (raws[0] if raws else "")[:200]}
 
     covered: set[int] = set()
     n_arcs = 0
