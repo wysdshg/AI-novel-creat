@@ -40,6 +40,8 @@ from app.routers import (
     feedback,
     # ——Phase 7.1 情节模板库 ——
     plot_templates,
+    # ——Phase 7.2 篇规划 ——
+    plans,
 )
 
 # 统一日志：必须在任何业务模块打日志之前初始化，否则 INFO 级日志会被
@@ -74,6 +76,7 @@ for r in (
     eval_router,                                      # Phase 4.1 最小 eval
     usage, feedback,                                  # Phase 4.2/4.3 观测消费端
     plot_templates,                                   # Phase 7.1 情节模板库
+    plans,                                            # Phase 7.2 篇规划
 ):
     app.include_router(r.router, prefix="/api/v1")
 
