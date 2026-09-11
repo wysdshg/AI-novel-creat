@@ -618,3 +618,29 @@ class ChapterSummaryORM(Base):
     arc_name: Mapped[str | None] = mapped_column(String(120), nullable=True)   # 如"金手指觉醒"
     arc_summary: Mapped[str | None] = mapped_column(Text, nullable=True)        # 弧概括（起因→升级→转折→结果）
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ArticlePlanORM(Base):
+    """篇规划（Phase 7.2，2026-09-11）：一个「篇」的**章节级计划**。
+
+    这是「篇 = 规划单元」的落地：由 模板检索 + 本书上下文 + 作者口述 生成
+    （`plan_crud.generate_plan`），作者拍板（`status="confirmed"`）后驱动逐章生成 ——
+    `context/layers.layer_chapter_plan` 会把「本章任务」注入生成上下文（P_CRITICAL 级，永不裁剪）。
+
+    `plan["lines"]` 每行一章：`{no, beat, summary, new_chars, recall_chars, target_words, hook, template_ref}`；
+    行级局部修改（含"AI 只改一行"）不需要重新生成整份计划。
+    """
+    __tablename__ = "article_plans"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    article_id: Mapped[str] = mapped_column(String(36), index=True)
+    template_ids: Mapped[list] = mapped_column(JSON, default=list)
+    template_names: Mapped[list] = mapped_column(JSON, default=list)   # 冗余存名字，便于显示
+    plan: Mapped[dict] = mapped_column(JSON, default=dict)
+    # template=套模板生成 / free=无模板自由规划 / ai_draft=作者口述升格为临时模板
+    origin: Mapped[str] = mapped_column(String(20), default="template")
+    raw_ai: Mapped[dict] = mapped_column(JSON, default=dict)           # AI 原始输出（留档，供反馈对比）
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)  # draft|confirmed
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                 onupdate=datetime.utcnow)

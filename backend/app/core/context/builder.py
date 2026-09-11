@@ -209,6 +209,8 @@ def build_chapter_messages(
                                   mode=lmode, query_text=query_text))
     _add(layers.layer_stage_summaries(db, project_id, chapter_no))
     _add(layers.layer_recent_memories(db, project_id, chapter_no, limit=recent_n))
+    # Phase 7.2：作者已确认的篇规划（本章任务卡，P_CRITICAL 级）—— 放在指令组之前
+    _add(layers.layer_chapter_plan(db, project_id, article_id=article_id, chapter_no=chapter_no))
     _add(layers.layer_prev_chapter(db, project_id, chapter_no))
 
     # ---------- 3. 参考文档：按相关性挑，不再一股脑全塞 ----------

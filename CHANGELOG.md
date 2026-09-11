@@ -6,6 +6,18 @@
 ---
 
 ## 2026-09-11
+- **Phase 7.2 篇规划流落地（端到端验证通过，"篇 = 规划单元"正式成立）**：
+  - 新表 `article_plans`（plan["lines"] 每行一章：beat/要点/新角色/召回角色/目标字数/钩子/模板溯源；origin；raw_ai 留档）。
+  - `services/plan_crud.py`：`generate_plan`（模板检索 top-2 + 本书上下文 + 作者口述 → DeepSeek 出逐章计划；
+    检索不到 → `origin=free` 自由规划不硬凑）；`refine_line`（**AI 只改一行**）；`save_lines`（表格编辑）；`confirm_plan`（拍板）。
+  - **防幻觉双闸**：召回角色后端校验（查无此人剔除 + 报告 unknown_chars）；新角色只进 planned_chars，拍板后走待确认实体。
+  - **生成联动（最后一米）**：`layers.layer_chapter_plan`（**P_CRITICAL**，永不裁剪）—— 作者确认的本章任务卡注入生成上下文。
+  - **★ 踩坑**：SQLAlchemy JSON 列**共享引用污染** —— `lines = plan.plan["lines"]` 拿到同一列表对象，
+    修改它会同步"污染"旧值 → 赋新值时 `new == old` → **UPDATE 被跳过**（refine 返回正确但库纹丝不动）。
+    修复：取值时 `copy.deepcopy`。**方法论：凡"读 JSON 列 → 改 → 写回"必须先深拷贝。**
+  - **端到端验证**（真实 DeepSeek，临时项目）：6 章退婚流计划（模板命中「退婚逆袭」、每章 beat/钩子/字数齐、
+    防幻觉剔除 3 个幻觉角色）→ AI 改第 2 行 ✓ → 拍板 ✓ → layer_chapter_plan 产出完整任务卡 ✓。临时数据已清理。
+  - API 5 个（generate / GET / PUT / refine-line / confirm），路由 160 / paths 96；单测 10 例；全量全绿。前端规划页待做。
 - **斗破苍穹首跑成功 + arc 截断 bug 修复 + ★ 检索门槛通过（2 本书 / 200 章 / 30 模板）**：
   - **OpenCode 首跑**（斗破 1~200 章）：概括 200 章 ✓、切段 **84 段** ✓、分类 ✓；**arc 归并失败**（`[arc] arcs:0`）。
   - **根因（我的参数失误）**：`merge_arcs` 的 `max_tokens=3000` —— 84 段归并输出约 6000~12000 tokens，**被截断** → JSON 不完整。

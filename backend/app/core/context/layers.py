@@ -15,13 +15,13 @@ from sqlalchemy.orm import Session
 from app.core.context.budget import (
     Block,
     P_CHARACTER, P_WORLD, P_FORESHADOW, P_MEMORY_RECENT,
-    P_MEMORY_STAGE, P_ENTITY, P_CONTINUITY, P_DISCUSSION,
+    P_MEMORY_STAGE, P_ENTITY, P_CONTINUITY, P_DISCUSSION, P_CRITICAL,
 )
 from app.models.orm import (
     ProjectORM, VolumeORM, ArticleORM, ChapterORM,
     CharacterORM, FactionORM, LocationORM, RelationORM, SkillORM,
     ForeshadowORM, SettingORM, DiscussionMessageORM,
-    ChapterMemoryORM, StageSummaryORM,
+    ChapterMemoryORM, StageSummaryORM, ArticlePlanORM,
 )
 
 # 上一章结尾保留的字符数——够模型接住语气和场景，又不至于喧宾夺主
@@ -522,6 +522,73 @@ def layer_prev_chapter(db: Session, project_id: str, chapter_no: int) -> Block |
     return Block(
         key="prev_tail", title="【上一章结尾】",
         content=content, priority=P_CONTINUITY, order=60, min_chars=200,
+    )
+
+
+def layer_chapter_plan(db: Session, project_id: str, article_id: str | None,
+                       chapter_no: int | None) -> Block | None:
+    """本篇规划中「本章」的任务卡（Phase 7.2，2026-09-11）。
+
+    规划是**作者拍板过的**（`article_plans.status="confirmed"`）—— 所以 priority 用
+    P_CRITICAL（等同"本章要点"级，永不裁剪）。包含：本章节拍 / 剧情要点 / 章尾钩子 /
+    目标字数 / 可引新角色 / 应召回老角色，以及前后章的计划（让本章知道自己在篇里的位置）。
+    """
+    def _load():
+        if not article_id or chapter_no is None:
+            return None
+        plan = (
+            db.query(ArticlePlanORM)
+            .filter_by(project_id=project_id, article_id=article_id, status="confirmed")
+            .order_by(ArticlePlanORM.updated_at.desc())
+            .first()
+        )
+        if plan is None:
+            return None
+        lines = (plan.plan or {}).get("lines") or []
+
+        def _line(no: int):
+            for x in lines:
+                try:
+                    if int(x.get("no") or 0) == no:
+                        return x
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        line = _line(int(chapter_no))
+        if not line:
+            return None
+        parts: list[str] = []
+        if line.get("template_ref"):
+            parts.append(f"本篇套路参考：{line['template_ref']}")
+        if line.get("beat"):
+            parts.append(f"本章节拍（必须踩到）：{line['beat']}")
+        if line.get("summary"):
+            parts.append(f"本章剧情要点：{line['summary']}")
+        if line.get("hook"):
+            parts.append(f"章尾钩子（必须埋）：{line['hook']}")
+        if line.get("target_words"):
+            parts.append(f"目标字数：约 {line['target_words']} 字")
+        if line.get("new_chars"):
+            parts.append(f"可引入新角色：{'、'.join(map(str, line['new_chars']))}")
+        if line.get("recall_chars"):
+            parts.append(f"应召回的老角色：{'、'.join(map(str, line['recall_chars']))}")
+        prev_l = _line(int(chapter_no) - 1)
+        next_l = _line(int(chapter_no) + 1)
+        if prev_l and prev_l.get("summary"):
+            parts.append(f"上一章（第{prev_l['no']}章）计划要点：{prev_l['summary']}")
+        if next_l and next_l.get("summary"):
+            parts.append(f"下一章（第{next_l['no']}章）将写：{next_l['summary']}")
+        if not parts:
+            return None
+        return "（以下任务来自作者已确认的篇规划，优先级最高，必须全部完成）\n" + "\n".join(parts)
+
+    content = _safe(_load)
+    if not content:
+        return None
+    return Block(
+        key="chapter_plan", title="【本篇规划 · 本章任务（作者已确认）】",
+        content=content, priority=P_CRITICAL, order=18, min_chars=80,
     )
 
 
