@@ -528,6 +528,10 @@ def segment_chapters(db: Session, book_name: str, *, batch: int = 10,
             if r.segment_no is None:
                 r.segment_no = max(1, seg_no - 1)
         n_batches += 1
+        # **逐批落库**（2026-09-11 改）：以前是全部批次跑完才统一 commit，
+        # 导致长任务进行中查库"什么都看不到"，误判成卡死（用户实际遇到过）。
+        db.commit()
+        logger.info(f"[plot_import] 段切分进度 {i + len(batch_rows)}/{len(rows)} 章")
         if progress:
             progress(i + len(batch_rows), len(rows))
     db.commit()

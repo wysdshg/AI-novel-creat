@@ -76,20 +76,29 @@ def main() -> int:
         db.close()
         return 0
 
+    def _prog4(label):
+        return lambda no, done, skipped, failed: print(
+            f"   {label} 第{no}章 done={done} skip={skipped} fail={failed}", flush=True)
+
+    def _prog2(label):
+        return lambda done, total: print(f"   {label} {done}/{total} 章", flush=True)
+
     if args.stage in ("summarize", "all"):
         if args.batch_summarize > 1 or args.concurrency > 1:
             # 批量 / 并发路径（LLM 在工作线程，DB 写在主线程）
             st = pi.import_chapters_batch(
                 db, args.book_dir, args.book_name,
                 batch_size=args.batch_summarize, concurrency=args.concurrency,
-                start=args.start, end=args.end, rate=rate)
+                start=args.start, end=args.end, rate=rate, progress=_prog4("概括"))
         else:
             # 默认路径：逐章串行（与旧版本行为完全一致）
             st = pi.import_chapters(db, args.book_dir, args.book_name,
-                                    start=args.start, end=args.end, rate=rate)
+                                    start=args.start, end=args.end, rate=rate,
+                                    progress=_prog4("概括"))
         print(f"[summarize] {st}")
     if args.stage in ("segment", "all"):
-        st = pi.segment_chapters(db, args.book_name, batch=args.batch, rate=rate)
+        st = pi.segment_chapters(db, args.book_name, batch=args.batch, rate=rate,
+                                 progress=_prog2("段切分"))
         print(f"[segment] {st}")
     if args.stage in ("label", "all"):
         st = pi.label_segments(db, args.book_name, rate=rate)
