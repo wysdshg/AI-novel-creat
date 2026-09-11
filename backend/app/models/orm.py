@@ -608,8 +608,11 @@ class ChapterSummaryORM(Base):
     chapter_no: Mapped[int] = mapped_column(Integer, index=True)
     title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     summary: Mapped[str] = mapped_column(Text, default="")                    # ~100 字章概括
+    summary_raw: Mapped[str | None] = mapped_column(Text, nullable=True)      # 匿名化前的原文备份（可回滚）
     segment_no: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     segment_summary: Mapped[str | None] = mapped_column(Text, nullable=True)  # 段概括（开始/发展/结尾）
+    segment_summary_raw: Mapped[str | None] = mapped_column(Text, nullable=True)  # 匿名化前备份
+    arc_summary_raw: Mapped[str | None] = mapped_column(Text, nullable=True)  # 弧概括匿名化前备份
     plot_label: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)  # 情节类型标签
     # —— Phase 7.1 故事弧归并（2026-09-11）——
     # 段（beat）是"事件粒度"，弧（arc）才是模板需要的单元（一个完整套路 = 一个爽点周期）。
@@ -644,3 +647,29 @@ class ArticlePlanORM(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
                                                  onupdate=datetime.utcnow)
+
+
+class BookAliasORM(Base):
+    """书级专名匿名化映射表（Phase 7.1 匿名化归一，2026-09-11 深夜）。
+
+    入库概括中的源书专名统一替换为**代称**（用户方案，23:44 拍板）：
+    - 主角 → `主角`；配角/势力按「敌友前缀 + 类型 + 数字」：`友·配角1` / `敌·宗门2` / `友·家族1`
+      （数字无上限，敌友在前缀 —— 不用 A/a 大小写区分，LLM 高频笔误且视觉不可辨）
+    - 境界 → **绝对阶梯** `境界1~境界N`（按本书修炼阶梯排序）+ 标注「主角当前=境界k」；
+      不用相对字母（C=当前会随主角升级漂移，同批概括语义全乱）
+
+    **双向表**：正向用于概括/模板/计划的匿名化；反向（代称 → 本书真实角色）用于
+    写正文时还原 —— 模板因此可跨书复用。
+    `role_desc` 是**槽位功能说明**（如"主角的师长，亦师亦友"）—— 计划生成时按说明选角，
+    解决"模板 A 的男配10 与模板 B 的男配13 聚合时角色混乱"的问题。
+    """
+    __tablename__ = "book_aliases"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    book_name: Mapped[str] = mapped_column(String(120), index=True)
+    original: Mapped[str] = mapped_column(String(120))            # 原名（萧炎 / 云岚宗 / 斗之气）
+    alias: Mapped[str] = mapped_column(String(60))                # 代称（主角 / 友·配角1 / 敌·宗门2 / 境界3）
+    kind: Mapped[str] = mapped_column(String(20), default="role")  # protagonist|role|sect|family|force|place|item|realm
+    relation: Mapped[str] = mapped_column(String(10), default="ally")  # ally|enemy|neutral
+    role_desc: Mapped[str | None] = mapped_column(String(300), nullable=True)  # 槽位功能说明
+    first_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

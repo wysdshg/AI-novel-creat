@@ -34,10 +34,11 @@ def main() -> int:
     ap.add_argument("--start", type=int, default=1)
     ap.add_argument("--end", type=int, default=None)
     ap.add_argument("--stage",
-                    choices=["summarize", "segment", "label", "arc", "distill", "all"],
+                    choices=["summarize", "segment", "label", "arc", "anonymize",
+                             "distill", "all"],
                     default="all",
                     help="summarize 逐章概括 / segment 情节段 / label 段分类 / arc 故事弧 / "
-                         "distill 凝练模板（跨书，需已有弧数据）/ all 前四步+报告")
+                         "anonymize 专名匿名化（概括之后跑）/ distill 凝练模板 / all 前四步+报告")
     ap.add_argument("--batch", type=int, default=10, help="段切分每批章数")
     ap.add_argument("--threshold", type=float, default=0.80,
                     help="弧聚类相似度阈值（distill 用，越大越保守）")
@@ -61,6 +62,15 @@ def main() -> int:
     db = dbmod.SessionLocal()
     rate = pi.RateLimiter(args.interval)
     t0 = time.time()
+
+    if args.stage == "anonymize":
+        from app.services import anonymizer
+        st = anonymizer.anonymize_book(db, args.book_name)
+        print(f"[anonymize] {st['aliases']} 条映射，触及 {st['touched']}/{st['chapters']} 章")
+        print(f"   主角 -> {st['protagonist']} | 境界阶梯 -> {st['realms']}")
+        print(f"[done] {time.time() - t0:.0f}s")
+        db.close()
+        return 0
 
     if args.stage == "distill":
         from app.services import plot_distill
