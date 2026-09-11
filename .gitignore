@@ -41,3 +41,6 @@ safety_clear_novels.py
 worklog-*.md
 # vite 临时缓存
 *.timestamp-*.mjs
+
+# 小说源文本（版权物，严禁入库）
+小说/
