@@ -28,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.orm import ChapterSummaryORM
@@ -473,11 +474,18 @@ def _segment_prompt(numbered: str, prev_tail: str | None) -> str:
 
 
 def segment_chapters(db: Session, book_name: str, *, batch: int = 10,
+                     concurrency: int = 1, force: bool = False,
                      rate: RateLimiter | None = None,
                      progress=None) -> dict:
     """情节段切分：每批 batch 章交给 LLM 划段，写回 segment_no / segment_summary。
 
-    幂等：每次重算会**先清空**该书的旧段标记。跨批次边界接受近似（MVP）。
+    **断点续跑（2026-09-11 加，重要）**：从前往后，**前缀内全部完成的批次直接跳过**，
+    段号从已有最大段号续接。原因：长任务会被外部超时中断（实测 OpenCode 的 shell 有 25 分钟超时），
+    而段切分是全书序列操作 —— 以前每次重跑都从零重算，存在"反复超时、永远跑不完"的风险。
+    `force=True` 才清空重算（想整体重切时用）。
+
+    **并发**：批次之间**没有顺序依赖**（不再用上批 tail 做衔接参考），可 `concurrency>1` 并行取结果；
+    但**段号在主线程按章节顺序分配**（顺序不会乱）。
     """
     rows = (
         db.query(ChapterSummaryORM)
@@ -487,55 +495,105 @@ def segment_chapters(db: Session, book_name: str, *, batch: int = 10,
     )
     rows = [r for r in rows if (r.summary or "").strip()]
     if len(rows) < 2:
-        return {"segments": 0, "chapters": len(rows)}
+        return {"segments": 0, "chapters": len(rows), "skipped_batches": 0,
+                "batches_run": 0}
 
-    for r in rows:          # 重算前清旧段标记
-        r.segment_no = None
-        r.segment_summary = None
-    db.commit()
+    if force:
+        for r in rows:
+            r.segment_no = None
+            r.segment_summary = None
+        db.commit()
 
+    bs = max(1, int(batch))
+    batch_specs = [rows[i:i + bs] for i in range(0, len(rows), bs)]
+
+    # 前缀式跳过：从前往后，遇到第一个未完成批次就停（保证段号顺序一致）
+    start_idx = 0
+    for bi, b_rows in enumerate(batch_specs):
+        if all(r.segment_no is not None for r in b_rows):
+            start_idx = bi + 1
+        else:
+            break
+    todo = list(enumerate(batch_specs))[start_idx:]
+    skipped_batches = start_idx
+
+    max_seg = (
+        db.query(func.max(ChapterSummaryORM.segment_no))
+        .filter_by(book_name=book_name)
+        .scalar()
+    ) or 0
+
+    if not todo:
+        return {"segments": max_seg, "chapters": len(rows),
+                "skipped_batches": skipped_batches, "batches_run": 0,
+                "note": "全部批次已完成"}
+
+    key = sf_key(db)
+    if not key:
+        raise RuntimeError("未配置硅基流动 Key（app_configs.retrieval.siliconflow_key）")
     rate = rate or RateLimiter()
-    seg_no = 1
-    prev_tail = None
-    n_batches = 0
-    for i in range(0, len(rows), batch):
-        batch_rows = rows[i:i + batch]
-        numbered = "\n".join(f"第{r.chapter_no}章：{r.summary}" for r in batch_rows)
-        raw = sf_chat(db, _segment_prompt(numbered, prev_tail),
-                      max_tokens=2048, temperature=0.2, rate=rate)
-        data = parse_json_loose(raw) or {}
-        segs = data.get("segments") or []
+
+    def run_batch(b_rows: list) -> dict:
+        numbered = "\n".join(f"第{r.chapter_no}章：{r.summary}" for r in b_rows)
+        raw = _sf_post(key, _segment_prompt(numbered, None), max_tokens=256 * len(b_rows),
+                       temperature=0.2, rate=rate)
+        return parse_json_loose(raw) or {}
+
+    results: dict[int, dict] = {}
+    if int(concurrency or 1) > 1 and len(todo) > 1:
+        with ThreadPoolExecutor(max_workers=int(concurrency)) as ex:
+            futs = {ex.submit(run_batch, b_rows): bi for bi, b_rows in todo}
+            for fut in as_completed(futs):
+                bi = futs[fut]
+                try:
+                    results[bi] = fut.result()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[plot_import] 段切分批次失败（重跑会补）: "
+                                   f"{type(e).__name__}: {e}")
+                    results[bi] = {}
+    else:
+        for bi, b_rows in todo:
+            try:
+                results[bi] = run_batch(b_rows)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[plot_import] 段切分批次失败（重跑会补）: "
+                               f"{type(e).__name__}: {e}")
+                results[bi] = {}
+
+    # 主线程按章节顺序分配段号 + 逐批落库（进度可观测、中断不丢已完成批次）
+    seg_no = max_seg + 1
+    done_chapters = 0
+    for i, (bi, b_rows) in enumerate(todo):
+        segs = (results.get(bi) or {}).get("segments") or []
         if not segs:
-            logger.warning(f"[plot_import] 段切分批次未解析出 JSON（第 {batch_rows[0].chapter_no}"
-                           f"~{batch_rows[-1].chapter_no} 章），整批回退为单段")
-            segs = [{"chapters": [r.chapter_no for r in batch_rows],
-                     "summary": "。".join(r.summary for r in batch_rows)[:200]}]
+            logger.warning(f"[plot_import] 段切分批次未解析出 JSON（第 {b_rows[0].chapter_no}"
+                           f"~{b_rows[-1].chapter_no} 章），整批回退为单段")
+            segs = [{"chapters": [r.chapter_no for r in b_rows],
+                     "summary": "。".join(r.summary for r in b_rows)[:200]}]
         covered: set[int] = set()
         for seg in segs:
             summary = (seg.get("summary") or "").strip()
+            hit_any = False
             for no in seg.get("chapters") or []:
-                hit = next((r for r in batch_rows if r.chapter_no == no), None)
+                hit = next((r for r in b_rows if r.chapter_no == no), None)
                 if hit is None or no in covered:
                     continue
                 hit.segment_no = seg_no
                 hit.segment_summary = summary
                 covered.add(no)
-            if covered and summary:
-                prev_tail = summary
+                hit_any = True
+            if hit_any:
                 seg_no += 1
-        # LLM 漏标的章节 → 归入上一段（保证全覆盖）
-        for r in batch_rows:
+        for r in b_rows:          # 漏标兜底：归入上一段，保证全覆盖
             if r.segment_no is None:
                 r.segment_no = max(1, seg_no - 1)
-        n_batches += 1
-        # **逐批落库**（2026-09-11 改）：以前是全部批次跑完才统一 commit，
-        # 导致长任务进行中查库"什么都看不到"，误判成卡死（用户实际遇到过）。
         db.commit()
-        logger.info(f"[plot_import] 段切分进度 {i + len(batch_rows)}/{len(rows)} 章")
+        done_chapters += len(b_rows)
+        logger.info(f"[plot_import] 段切分进度 {start_idx * bs + done_chapters}/{len(rows)} 章")
         if progress:
-            progress(i + len(batch_rows), len(rows))
-    db.commit()
-    return {"segments": seg_no - 1, "chapters": len(rows), "batches": n_batches}
+            progress(start_idx * bs + done_chapters, len(rows))
+    return {"segments": seg_no - 1, "chapters": len(rows),
+            "skipped_batches": skipped_batches, "batches_run": len(todo)}
 
 
 # ---------------------------------------------------------------------------

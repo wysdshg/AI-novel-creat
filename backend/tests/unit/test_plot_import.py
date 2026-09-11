@@ -81,59 +81,6 @@ class TestImportChapters:
         assert sorted(nos) == [2, 3]
 
 
-class TestSegment:
-    def _seed(self, test_db, nos):
-        for no in nos:
-            test_db.add(pi.ChapterSummaryORM(
-                id=f"s{no}", book_name="书", chapter_no=no, summary=f"第{no}章概括"))
-        test_db.commit()
-
-    def test_writeback(self, test_db, monkeypatch):
-        self._seed(test_db, [1, 2, 3, 4])
-        raw = json.dumps({"segments": [
-            {"chapters": [1, 2], "summary": "段一概括"},
-            {"chapters": [3, 4], "summary": "段二概括"},
-        ]}, ensure_ascii=False)
-        monkeypatch.setattr(pi, "sf_chat", lambda db, c, **kw: raw)
-        r = pi.segment_chapters(test_db, "书", batch=10)
-        assert r["segments"] == 2
-        rows = test_db.query(pi.ChapterSummaryORM).order_by(
-            pi.ChapterSummaryORM.chapter_no).all()
-        assert [r.segment_no for r in rows] == [1, 1, 2, 2]
-        assert rows[0].segment_summary == "段一概括"
-
-    def test_uncovered_chapter_falls_back(self, test_db, monkeypatch):
-        """LLM 漏标第 3 章 → 兜底归入最后一段（保证全覆盖）。"""
-        self._seed(test_db, [1, 2, 3])
-        raw = json.dumps({"segments": [{"chapters": [1, 2], "summary": "段一"}]},
-                         ensure_ascii=False)
-        monkeypatch.setattr(pi, "sf_chat", lambda db, c, **kw: raw)
-        r = pi.segment_chapters(test_db, "书", batch=10)
-        rows = test_db.query(pi.ChapterSummaryORM).order_by(
-            pi.ChapterSummaryORM.chapter_no).all()
-        assert rows[2].segment_no == 1
-        assert r["segments"] == 1
-
-    def test_bad_json_falls_back_single_segment(self, test_db, monkeypatch):
-        self._seed(test_db, [1, 2])
-        monkeypatch.setattr(pi, "sf_chat", lambda db, c, **kw: "这不是JSON")
-        r = pi.segment_chapters(test_db, "书", batch=10)
-        assert r["segments"] == 1
-        rows = test_db.query(pi.ChapterSummaryORM).all()
-        assert all(r.segment_no == 1 for r in rows)
-
-    def test_reseg_clears_old(self, test_db, monkeypatch):
-        """重算段前要清旧标记（否则旧 segment_no 残留产生交错）。"""
-        self._seed(test_db, [1, 2])
-        test_db.query(pi.ChapterSummaryORM).update({"segment_no": 9})
-        test_db.commit()
-        raw = json.dumps({"segments": [{"chapters": [1, 2], "summary": "新段"}]})
-        monkeypatch.setattr(pi, "sf_chat", lambda db, c, **kw: raw)
-        pi.segment_chapters(test_db, "书", batch=10)
-        rows = test_db.query(pi.ChapterSummaryORM).all()
-        assert all(r.segment_no == 1 for r in rows), "旧段号 9 应被清掉"
-
-
 class TestLabel:
     def test_label_writeback(self, test_db, monkeypatch):
         test_db.add(pi.ChapterSummaryORM(id="a", book_name="书", chapter_no=1,

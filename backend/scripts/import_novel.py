@@ -47,6 +47,8 @@ def main() -> int:
                     help="每 N 章一次概括调用（默认 1=逐章；建议 3 —— 请求数降 1/N，跨章更连贯）")
     ap.add_argument("--concurrency", type=int, default=1,
                     help="并发批次数（默认 1=串行；建议 2~3 —— 瓶颈是等生成，并发才能提速）")
+    ap.add_argument("--force", action="store_true",
+                    help="段切分强制清空重算（默认 False = 断点续跑，跳过已完成批次）")
     ap.add_argument("--interval", type=float, default=2.0, help="请求发起最小间隔秒（防限流，禁止调小）")
     ap.add_argument("--out", default=None, help="报告输出路径（默认 outputs/<书名>-导入报告.md）")
     args = ap.parse_args()
@@ -97,8 +99,9 @@ def main() -> int:
                                     progress=_prog4("概括"))
         print(f"[summarize] {st}")
     if args.stage in ("segment", "all"):
-        st = pi.segment_chapters(db, args.book_name, batch=args.batch, rate=rate,
-                                 progress=_prog2("段切分"))
+        st = pi.segment_chapters(db, args.book_name, batch=args.batch,
+                                 concurrency=args.concurrency, force=args.force,
+                                 rate=rate, progress=_prog2("段切分"))
         print(f"[segment] {st}")
     if args.stage in ("label", "all"):
         st = pi.label_segments(db, args.book_name, rate=rate)
