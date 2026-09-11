@@ -34,7 +34,11 @@ def main() -> int:
     ap.add_argument("--end", type=int, default=None)
     ap.add_argument("--stage", choices=["summarize", "segment", "label", "all"], default="all")
     ap.add_argument("--batch", type=int, default=10, help="段切分每批章数")
-    ap.add_argument("--interval", type=float, default=2.0, help="请求最小间隔秒（防限流，禁止调小）")
+    ap.add_argument("--batch-summarize", type=int, default=1,
+                    help="每 N 章一次概括调用（默认 1=逐章；建议 3 —— 请求数降 1/N，跨章更连贯）")
+    ap.add_argument("--concurrency", type=int, default=1,
+                    help="并发批次数（默认 1=串行；建议 2~3 —— 瓶颈是等生成，并发才能提速）")
+    ap.add_argument("--interval", type=float, default=2.0, help="请求发起最小间隔秒（防限流，禁止调小）")
     ap.add_argument("--out", default=None, help="报告输出路径（默认 outputs/<书名>-导入报告.md）")
     args = ap.parse_args()
 
@@ -44,8 +48,16 @@ def main() -> int:
     t0 = time.time()
 
     if args.stage in ("summarize", "all"):
-        st = pi.import_chapters(db, args.book_dir, args.book_name,
-                                start=args.start, end=args.end, rate=rate)
+        if args.batch_summarize > 1 or args.concurrency > 1:
+            # 批量 / 并发路径（LLM 在工作线程，DB 写在主线程）
+            st = pi.import_chapters_batch(
+                db, args.book_dir, args.book_name,
+                batch_size=args.batch_summarize, concurrency=args.concurrency,
+                start=args.start, end=args.end, rate=rate)
+        else:
+            # 默认路径：逐章串行（与旧版本行为完全一致）
+            st = pi.import_chapters(db, args.book_dir, args.book_name,
+                                    start=args.start, end=args.end, rate=rate)
         print(f"[summarize] {st}")
     if args.stage in ("segment", "all"):
         st = pi.segment_chapters(db, args.book_name, batch=args.batch, rate=rate)

@@ -19,10 +19,12 @@ Key 复用 `app_configs.retrieval.siliconflow_key`（与向量检索同一把）
 import json
 import logging
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -50,18 +52,26 @@ _SEGMENT_SYS = "你是网文情节结构分析助手。只输出 JSON，不要�
 # 硅基流动直连（管线是离线批处理子系统，刻意不走 gateway：限速/退避/关思考全自控）
 # ---------------------------------------------------------------------------
 class RateLimiter:
-    """串行限速器：保证相邻两次请求间隔 >= min_interval。"""
+    """全局请求限速器：保证相邻两次请求的**发起**间隔 >= min_interval。
+
+    **线程安全**（2026-09-11 加锁）：并发概括时多个线程共用一个实例，
+    不加锁会出现多个线程同时穿过判定 → 瞬间打爆限流。
+    锁内 sleep 的语义是"请求发起被节流，但已发出的请求仍并行生成" ——
+    这正是我们要的：RPM 受控，而生成阶段重叠。
+    """
 
     def __init__(self, min_interval: float = MIN_INTERVAL_S):
         self._min = max(0.0, float(min_interval))
         self._last = 0.0
+        self._lock = threading.Lock()
 
     def wait(self) -> None:
-        now = time.time()
-        gap = now - self._last
-        if gap < self._min:
-            time.sleep(self._min - gap)
-        self._last = time.time()
+        with self._lock:
+            now = time.time()
+            gap = now - self._last
+            if gap < self._min:
+                time.sleep(self._min - gap)
+            self._last = time.time()
 
 
 def sf_key(db: Session) -> str | None:
@@ -78,13 +88,13 @@ def sf_key(db: Session) -> str | None:
     return v or None
 
 
-def sf_chat(db: Session, user_content: str, *, max_tokens: int = 1024,
-            temperature: float = 0.3, timeout: int = 120,
-            rate: RateLimiter | None = None) -> str:
-    """调用硅基流动 Qwen3-8B（关闭思考）。429/5xx 指数退避。失败抛 RuntimeError。"""
-    key = sf_key(db)
-    if not key:
-        raise RuntimeError("未配置硅基流动 Key（app_configs.retrieval.siliconflow_key）")
+def _sf_post(key: str, user_content: str, *, max_tokens: int = 1024,
+             temperature: float = 0.3, timeout: int = 120,
+             rate: RateLimiter | None = None) -> str:
+    """纯网络调用（**不依赖 db session**）—— 并发路径专用，可在工作线程安全调用。
+
+    SQLAlchemy Session 非线程安全，所以 Key 由调用方在主线程取好传进来。
+    """
     rate = rate or RateLimiter()
     body = {
         "model": SF_MODEL,
@@ -119,9 +129,23 @@ def sf_chat(db: Session, user_content: str, *, max_tokens: int = 1024,
         except Exception as e:
             last_err = e
             if attempt < MAX_RETRY - 1:
-                time.sleep(2.0 ** (attempt + 1))
+                backoff = 2.0 ** (attempt + 1)
+                logger.warning(f"[plot_import] 请求异常，{backoff:.0f}s 后重试"
+                               f"（{attempt + 1}/{MAX_RETRY}）: {type(e).__name__}: {e}")
+                time.sleep(backoff)
                 continue
     raise RuntimeError(f"硅基流动调用失败（重试 {MAX_RETRY} 次）: {last_err}")
+
+
+def sf_chat(db: Session, user_content: str, **kw) -> str:
+    """调用硅基流动 Qwen3-8B（关闭思考）。429/5xx 指数退避。失败抛 RuntimeError。
+
+    带 Key 解析的封装（串行路径用）；并发路径请用 `_sf_post` + 主线程预取的 Key。
+    """
+    key = sf_key(db)
+    if not key:
+        raise RuntimeError("未配置硅基流动 Key（app_configs.retrieval.siliconflow_key）")
+    return _sf_post(key, user_content, **kw)
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +176,19 @@ def read_text(path: str) -> str:
 # ---------------------------------------------------------------------------
 # 步骤 2：逐章概括（幂等，断点续跑）
 # ---------------------------------------------------------------------------
+def _valid_summary(s: str) -> bool:
+    """概括有效性粗校验：挡住"解析残渣/错误说明"被当成概括写进库。
+
+    真实概括 80~120 字，15 字是很宽的下限；另挡 JSON 残片特征。
+    （2026-09-11：单测暴露出补跑路径没校验，会把 "这不是 JSON" 原样入库）
+    """
+    if not s or len(s) < 15:
+        return False
+    if "chapters" in s or s.lstrip().startswith(("{", "[")):
+        return False
+    return True
+
+
 def _summarize_prompt(title: str, text: str) -> str:
     return (
         "请用 80~120 字概括这一章的主要情节。要求：\n"
@@ -201,6 +238,177 @@ def import_chapters(db: Session, book_dir: str, book_name: str, *,
         if progress:
             progress(ch["no"], done, skipped, failed)
     return {"done": done, "skipped": skipped, "failed": failed, "total_files": len(chs)}
+
+
+def _batch_prompt(items: list[dict]) -> str:
+    """一次让模型概括连续 N 章（items: [{no, title, text}]）。"""
+    blocks = [
+        f"【第{it['no']}章 {it['title']}】\n{it['text'][:MAX_CHAPTER_CHARS]}"
+        for it in items
+    ]
+    n = len(items)
+    return (
+        f"下面是连续 {n} 章的正文。请**为每一章分别**写 80~120 字概括。要求：\n"
+        "1. 只记客观事件：谁、在哪、做了什么、结果如何；\n"
+        "2. 记录新出场人物（带身份）与重要物品/地点；\n"
+        "3. 不要评价文笔，不要猜测后续，不要用「本章讲述了」开头；\n"
+        "4. 每章概括**独立完整**，不要把多章揉成一段。\n\n"
+        "只输出 JSON（不要 markdown 代码块、不要任何额外说明）：\n"
+        '{"chapters":[{"no":章号,"summary":"概括"},...]}\n\n'
+        + "\n\n".join(blocks)
+    )
+
+
+def import_chapters_batch(db: Session, book_dir: str, book_name: str, *,
+                          batch_size: int = 3, concurrency: int = 1,
+                          start: int = 1, end: int | None = None,
+                          rate: RateLimiter | None = None,
+                          progress=None) -> dict:
+    """批量概括入库（每 batch_size 章一次调用）+ 可选并发。**幂等语义同 import_chapters**。
+
+    为什么这么做（2026-09-11 实测设计）：
+    - 请求数降到 1/batch_size → 限流压力大降（1671 章：1671 次 → 557 次）；
+    - 模型一次看到连续 N 章 → 跨章事件（一场战斗跨几章）概括更连贯；
+    - 并发让"等生成"的时间重叠 —— **真正的瓶颈是等模型生成，不是限速间隔**。
+
+    线程模型：**LLM 调用在工作线程（纯 IO），DB 写入全部回主线程串行** ——
+    SQLAlchemy Session 非线程安全，这样既拿到并发又避开多线程写 SQLite。
+    """
+    chs = discover_chapters(book_dir)
+    if not chs:
+        raise RuntimeError(f"目录中未发现章节文件（需形如 0001_标题.txt）: {book_dir}")
+
+    pending: list[dict] = []
+    skipped = 0
+    for ch in chs:
+        if ch["no"] < start or (end and ch["no"] > end):
+            continue
+        if db.query(ChapterSummaryORM).filter_by(
+                book_name=book_name, chapter_no=ch["no"]).first():
+            skipped += 1
+            continue
+        pending.append(ch)
+
+    if not pending:
+        return {"done": 0, "skipped": skipped, "failed": 0, "batches": 0,
+                "total_files": len(chs)}
+
+    key = sf_key(db)      # 主线程取 Key（工作线程不碰 session）
+    if not key:
+        raise RuntimeError("未配置硅基流动 Key（app_configs.retrieval.siliconflow_key）")
+    rate = rate or RateLimiter()
+    bs = max(1, int(batch_size))
+    batches = [pending[i:i + bs] for i in range(0, len(pending), bs)]
+
+    def run_batch(batch: list[dict]):
+        """工作线程：只读磁盘 + 网络，不碰 session。"""
+        items = [{"no": c["no"], "title": c["title"], "text": read_text(c["path"])}
+                 for c in batch]
+        raw = _sf_post(key, _batch_prompt(items), max_tokens=400 * len(batch),
+                       temperature=0.2, rate=rate)
+        data = parse_json_loose(raw) or {}
+        got: dict[int, str] = {}
+        for row in data.get("chapters") or []:
+            try:
+                no = int(row.get("no"))
+            except (TypeError, ValueError):
+                continue
+            s = str(row.get("summary") or "").strip()
+            if s and _valid_summary(s):
+                got[no] = s
+        return batch, got
+
+    results: list[tuple[list, dict]] = []
+    failed_batches = 0
+    if int(concurrency or 1) > 1:
+        with ThreadPoolExecutor(max_workers=int(concurrency)) as ex:
+            futs = [ex.submit(run_batch, b) for b in batches]
+            for fut in as_completed(futs):
+                try:
+                    results.append(fut.result())
+                except Exception as e:  # noqa: BLE001
+                    failed_batches += 1
+                    logger.warning(f"[plot_import] 批次失败（重跑同一命令会自动补）: "
+                                   f"{type(e).__name__}: {e}")
+    else:
+        for b in batches:
+            try:
+                results.append(run_batch(b))
+            except Exception as e:  # noqa: BLE001
+                failed_batches += 1
+                logger.warning(f"[plot_import] 批次失败（重跑同一命令会自动补）: "
+                               f"{type(e).__name__}: {e}")
+
+    # 主线程串行写库
+    done = failed = 0
+    missed: list[dict] = []
+    for batch, got in results:
+        for c in batch:
+            s = got.get(c["no"])
+            if not s:
+                missed.append(c)       # 批内漏章，稍后单章补跑
+                continue
+            db.add(ChapterSummaryORM(
+                id=uuid.uuid4().hex,
+                book_name=book_name,
+                chapter_no=c["no"],
+                title=c["title"] or None,
+                summary=s,
+                created_at=datetime.utcnow(),
+            ))
+            done += 1
+        db.commit()
+        if progress:
+            progress(batch[-1]["no"], done, skipped, failed)
+
+    # 漏章补跑（2026-09-11 实测：批量模式下 8B 偶尔漏掉批内某章）。
+    # 策略分两级：**优先把漏章重新凑批再跑一轮批量**（省得多：3 章批量 ~15s vs 单章 3×30s），
+    # 仍漏的才用单章兜底（极少发生）。不依赖"下次重跑命令"来兜，让单轮尽量补齐。
+    retried = 0
+    if missed:
+        retried = len(missed)
+        still_missing: list[dict] = []
+        for sb in [missed[i:i + bs] for i in range(0, len(missed), bs)]:
+            try:
+                _, got = run_batch(sb)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[plot_import] 漏章批量补跑失败: {type(e).__name__}: {e}")
+                got = {}
+            for c in sb:
+                s = got.get(c["no"])
+                if not s:
+                    still_missing.append(c)
+                    continue
+                db.add(ChapterSummaryORM(
+                    id=uuid.uuid4().hex, book_name=book_name, chapter_no=c["no"],
+                    title=c["title"] or None, summary=s, created_at=datetime.utcnow()))
+                done += 1
+        db.commit()
+
+        # 兜底：批量仍漏的用单章 prompt（更简单、成功率更高）
+        for c in still_missing:
+            try:
+                s = _sf_post(key, _summarize_prompt(c["title"], read_text(c["path"])),
+                             max_tokens=512, temperature=0.2, rate=rate).strip()
+                if not _valid_summary(s):
+                    s = ""
+            except Exception as e:  # noqa: BLE001
+                s = ""
+                logger.warning(f"[plot_import] 第{c['no']}章单章补跑失败（重跑命令可再补）: "
+                               f"{type(e).__name__}: {e}")
+            if not s:
+                failed += 1
+                continue
+            db.add(ChapterSummaryORM(
+                id=uuid.uuid4().hex, book_name=book_name, chapter_no=c["no"],
+                title=c["title"] or None, summary=s, created_at=datetime.utcnow()))
+            done += 1
+        db.commit()
+        logger.info(f"[plot_import] 漏章补跑：{retried} 章，批量+单章兜底后仍失败 {failed}")
+
+    return {"done": done, "skipped": skipped, "failed": failed,
+            "failed_batches": failed_batches, "batches": len(batches),
+            "retried": retried, "total_files": len(chs)}
 
 
 # ---------------------------------------------------------------------------

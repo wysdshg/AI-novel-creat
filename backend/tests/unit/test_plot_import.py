@@ -18,6 +18,11 @@ def _mk_book(tmp_path, chapters: dict[int, str]) -> str:
     return str(book)
 
 
+def _fake_sum(n: int) -> str:
+    """够长的假概括（真实概括 80~120 字，管线有 ≥15 字的有效性校验）。"""
+    return f"第{n}章概括：主角在测试场景中完成了一件重要事件，过程与结果均符合预期。"
+
+
 class TestDiscover:
     def test_parse_names_sorted(self, tmp_path):
         book = _mk_book(tmp_path, {12: "乙", 1: "甲", 3: "丙"})
@@ -181,3 +186,85 @@ class TestExportReport:
         text = (tmp_path / "r.md").read_text(encoding="utf-8")
         assert path.endswith("r.md")
         assert "概" in text and "未分段" in text
+
+
+class TestBatchSummarize:
+    """批量概括（一次 N 章）+ 并发路径。
+
+    重点：JSON 解析容错、模型漏章计入 failed（重跑可补）、幂等、
+    并发下 DB 写入仍在主线程（session 不跨线程）。
+    """
+
+    def _mk(self, tmp_path, nos):
+        return _mk_book(tmp_path, {n: f"第{n}章正文甲乙丙" for n in nos})
+
+    def _mock(self, monkeypatch, payload):
+        monkeypatch.setattr(pi, "sf_key", lambda db: "test-key")
+
+        if callable(payload):
+            monkeypatch.setattr(pi, "_sf_post", payload)
+        else:
+            monkeypatch.setattr(pi, "_sf_post", lambda k, c, **kw: payload)
+
+    def test_batch_ok(self, test_db, tmp_path, monkeypatch):
+        book = self._mk(tmp_path, [1, 2, 3])
+        self._mock(monkeypatch, json.dumps({"chapters": [
+            {"no": 1, "summary": _fake_sum(1)},
+            {"no": 2, "summary": _fake_sum(2)},
+            {"no": 3, "summary": _fake_sum(3)},
+        ]}, ensure_ascii=False))
+        st = pi.import_chapters_batch(test_db, book, "书", batch_size=3)
+        assert st["done"] == 3 and st["failed"] == 0 and st["batches"] == 1
+        rows = test_db.query(pi.ChapterSummaryORM).order_by(
+            pi.ChapterSummaryORM.chapter_no).all()
+        assert [r.summary for r in rows] == [_fake_sum(1), _fake_sum(2), _fake_sum(3)]
+
+    def test_missing_chapter_counted_failed(self, test_db, tmp_path, monkeypatch):
+        """模型只回 2 章 → 漏的那章计 failed（重跑会补），不入库空概括。"""
+        book = self._mk(tmp_path, [1, 2, 3])
+        self._mock(monkeypatch, json.dumps({"chapters": [
+            {"no": 1, "summary": _fake_sum(1)}, {"no": 2, "summary": _fake_sum(2)},
+        ]}, ensure_ascii=False))
+        st = pi.import_chapters_batch(test_db, book, "书", batch_size=3)
+        assert st["done"] == 2 and st["failed"] == 1
+        assert test_db.query(pi.ChapterSummaryORM).count() == 2
+
+    def test_bad_json_all_failed_but_no_crash(self, test_db, tmp_path, monkeypatch):
+        book = self._mk(tmp_path, [1, 2])
+        self._mock(monkeypatch, "这不是 JSON")
+        st = pi.import_chapters_batch(test_db, book, "书", batch_size=2)
+        assert st["done"] == 0 and st["failed"] == 2
+        assert test_db.query(pi.ChapterSummaryORM).count() == 0
+
+    def test_idempotent_skip(self, test_db, tmp_path, monkeypatch):
+        book = self._mk(tmp_path, [1, 2, 3])
+        test_db.add(pi.ChapterSummaryORM(id="x", book_name="书", chapter_no=1, summary="已有"))
+        test_db.commit()
+        self._mock(monkeypatch, json.dumps({"chapters": [
+            {"no": 2, "summary": _fake_sum(2)}, {"no": 3, "summary": _fake_sum(3)},
+        ]}, ensure_ascii=False))
+        st = pi.import_chapters_batch(test_db, book, "书", batch_size=3)
+        assert st["skipped"] == 1 and st["done"] == 2
+
+    def test_concurrent_path_writes_all(self, test_db, tmp_path, monkeypatch):
+        """并发路径：多批并行调用，写库仍在主线程 → 章节数正确。"""
+        book = self._mk(tmp_path, [1, 2, 3, 4, 5, 6])
+
+        def fake_post(key, content, **kw):
+            nos = [int(x) for x in __import__("re").findall(r"【第(\d+)章", content)]
+            return json.dumps({"chapters": [{"no": n, "summary": _fake_sum(n)} for n in nos]},
+                              ensure_ascii=False)
+        self._mock(monkeypatch, fake_post)
+        st = pi.import_chapters_batch(test_db, book, "书", batch_size=2, concurrency=3)
+        assert st["done"] == 6 and st["failed"] == 0
+        assert test_db.query(pi.ChapterSummaryORM).count() == 6
+
+    def test_no_key_raises(self, test_db, tmp_path, monkeypatch):
+        book = self._mk(tmp_path, [1])
+        monkeypatch.setattr(pi, "sf_key", lambda db: None)
+        try:
+            pi.import_chapters_batch(test_db, book, "书")
+            raised = False
+        except RuntimeError as e:
+            raised = "Key" in str(e)
+        assert raised, "无 Key 应明确报错"
