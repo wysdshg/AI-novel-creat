@@ -161,6 +161,22 @@ def _replace_all(text: str, pairs: list[tuple[str, str]]) -> str:
     return text
 
 
+def anonymize_text(text: str, mapping: list[dict]) -> str:
+    """对任意文本做一次正向匿名化（长名优先）。
+
+    公开入口，供下游复用同一条替换规则 —— 目前的使用者是 `plot_distill.collect_arcs`：
+    `book_aliases.role_desc` 是**在原文上抽取**的，实测直接含源书专名
+    （如"…称主角为萧炎哥哥""云岚宗宗主"），若原样带进模板 cast 会打破
+    「反抄袭门槛：源书专名命中 0」。**只改内存里的文本，不动库值** ——
+    `book_aliases` 要留作反向还原（代称 → 本书真实角色）的原料。
+    """
+    if not text or not mapping:
+        return text
+    pairs = sorted(((m["original"], m["alias"]) for m in mapping if m.get("original")),
+                   key=lambda p: -len(p[0]))
+    return _replace_all(text, pairs)
+
+
 def apply_replacement(db: Session, book_name: str, mapping: list[dict]) -> dict:
     """把全书概括文本里的原名替换为代称（原文备份到 *_raw，幂等：raw 已存在则不覆盖）。"""
     pairs = sorted(((m["original"], m["alias"]) for m in mapping),

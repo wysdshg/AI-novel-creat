@@ -42,6 +42,32 @@ def _load_sqlite_vec(dbapi_conn, _record):
         logger.debug(f"[database] sqlite-vec 扩展未加载（将回退纯 Python 余弦）: {type(e).__name__}: {e}")
 
 
+@event.listens_for(Engine, "connect")
+def _set_sqlite_concurrency_pragma(dbapi_conn, _record):
+    """SQLite 并发与耐久性设置（2026-09-12，为**多 AI 并行灌数据**铺路）。
+
+    - `journal_mode=WAL`：读不阻塞写、写不阻塞读。默认的 rollback journal 下，
+      一个写事务会锁住整库，多个导入进程并行时几乎必然互锁。
+    - `busy_timeout=5000`：写锁竞争时**等待 5 秒**再报错。默认 0 表示立刻抛
+      `database is locked` —— 批量导入时每次提交都是一次写事务，没有这个必然是满地失败。
+    - `synchronous=NORMAL`：WAL 下的推荐档位（崩溃可能丢最后一个事务，但不会损坏库）。
+      这是导入批任务的合理取舍；要绝对 durability 才需要 FULL。
+
+    加载失败只警告不阻断：这些是**性能/并发优化**，不是功能前提。
+    """
+    if type(dbapi_conn).__module__ != "sqlite3":
+        return
+    try:
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA busy_timeout=5000")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.close()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[database] SQLite 并发 PRAGMA 设置失败（不影响功能，"
+                       f"并行导入时可能遇到 database is locked）: {type(e).__name__}: {e}")
+
+
 def get_engine():
     global _engine, SessionLocal
     if _engine is None:
