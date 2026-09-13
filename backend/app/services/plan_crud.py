@@ -25,6 +25,7 @@ from app.models.orm import (
     CharacterORM, ForeshadowORM, VolumeORM,
 )
 from app.services.plot_import import _ds_post, ds_key, make_usage_cb, parse_json_loose
+from app.services import casting_crud
 from app.services import plot_template_crud as tpl_crud
 
 logger = logging.getLogger(__name__)
@@ -46,7 +47,17 @@ def _book_context(db: Session, project_id: str, article_id: str) -> dict:
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[plan] 卷上下文缺失: {type(e).__name__}: {e}")
     try:
-        chars = db.query(CharacterORM).filter_by(project_id=project_id).limit(40).all()
+        # ⚠️ 必须排序 + 过滤（Phase 7.3 ③，2026-09-13 修）：
+        # 原实现是裸的 `characters.limit(40)` —— **无排序、无筛选**，导致死角色、
+        # 失踪角色、三百章没出现过的角色，与主角**平等地**进规划上下文
+        # （docs/03 §7.3.5 实测记录：`plan_crud.py:49-50`）。
+        # 现在：已死角色剔除；其余按「最近出场」倒序（活跃角色优先占 40 个名额）。
+        chars = (db.query(CharacterORM)
+                 .filter_by(project_id=project_id)
+                 .filter(CharacterORM.status != "dead")
+                 .order_by(CharacterORM.last_seen_chapter.desc().nullslast(),
+                           CharacterORM.created_at.asc())
+                 .limit(40).all())
         ctx["characters"] = [c.name for c in chars if c.name]
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[plan] 角色上下文缺失: {type(e).__name__}: {e}")
@@ -198,6 +209,17 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
     if unknown:
         logger.warning(f"[plan] 召回角色查无此人（已剔除）: {unknown}")
 
+    # 出场校验（Phase 7.3 ③）：**必须在落库前跑** —— 它会从 recall_chars 里剔除
+    # 已死角色；放落库后跑的话，剔除结果只改了本地列表、DB 里仍是脏数据。
+    blocked_dead: list[str] = []
+    try:
+        check = casting_crud.check_appearances(db, project_id, lines)
+        blocked_dead = check.get("blocked_dead") or []
+        if blocked_dead:
+            logger.warning(f"[plan] 已死角色被从召回列表剔除: {blocked_dead}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[plan] 出场校验失败（不影响计划）: {type(e).__name__}: {e}")
+
     # 同一篇只保留一条当前计划：旧 draft 直接覆盖；confirmed 的会归档进 raw_ai 历史
     old = (db.query(ArticlePlanORM)
            .filter_by(project_id=project_id, article_id=article_id)
@@ -218,8 +240,10 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
         old.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(old)
+        casting = _run_casting(db, project_id, article_id, lines)
         return {"plan_id": old.id, "lines": len(lines), "unknown_chars": unknown,
-                "templates": [t["name"] for t in templates]}
+                "templates": [t["name"] for t in templates],
+                "blocked_dead": blocked_dead, **casting}
 
     o = ArticlePlanORM(
         id=uuid.uuid4().hex,
@@ -237,8 +261,30 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
     db.add(o)
     db.commit()
     db.refresh(o)
+    casting = _run_casting(db, project_id, article_id, lines)
     return {"plan_id": o.id, "lines": len(lines), "unknown_chars": unknown,
-            "templates": [t["name"] for t in templates]}
+            "templates": [t["name"] for t in templates],
+            "blocked_dead": blocked_dead, **casting}
+
+
+def _run_casting(db: Session, project_id: str, article_id: str,
+                 lines: list[dict]) -> dict:
+    """计划落库后跑**向量选角**（Phase 7.3 ③，2026-09-13）。
+
+    出场校验（死角色剔除）已在落库前跑过（见 generate_plan）—— 这里只做选角。
+    选角**失败即降级**（无槽位/无角色池/embedding 挂了）→ 返回 `casting_reason`
+    让前端能说清"这篇为什么没选角"，而不是静默无输出。
+    整个函数**绝不抛异常**：选角是增强能力，不能让它把计划生成（主业务）带崩。
+    """
+    out: dict = {"casting_reason": None, "castings": []}
+    try:
+        r = casting_crud.cast_slots_for_plan(db, project_id, article_id)
+        out["castings"] = r.get("castings") or []
+        out["casting_reason"] = r.get("reason")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[plan] 向量选角失败（不影响计划）: {type(e).__name__}: {e}")
+        out["casting_reason"] = f"{type(e).__name__}: {str(e)[:120]}"
+    return out
 
 
 def refine_line(db: Session, project_id: str, article_id: str, *,

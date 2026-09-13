@@ -6,6 +6,27 @@
 ---
 
 ## 2026-09-13
+- **★ 7.3 角色向量选角全量落地（②③④⑤⑥，单测 324 全绿）**：
+  - **槽位向量库**：`plot_template_crud` 新增 `SOURCE_TYPE_CAST="plot_cast"`，与模板块**分开索引、分开清理**
+    （混一个 source_type 会被 beat 文本淹没）；`chunk_idx == cast 数组下标` 直接反查；
+    向量文本 = `slot｜desc｜定位｜srcs 实现` 混合（纯功能描述太抽象，分数整体偏低）。
+  - **新表 `plan_castings` + `PlanCastingORM`**：`UNIQUE(plan_id, slot)` 数据库级保证"同篇同功能位一个角色"；
+    表是唯一真相源（避开 7.2 JSON 列共享引用坑）；`_persist` 只删 `source="auto"`，manual 保留；
+    级联删除三入口（篇/卷/项目）全接入。
+  - **选角算法**（`casting_crud`，~460 行）：显式余弦（不用 store 的 `1/(1+L2)`）→ 状态门
+    （四态 alive/dormant/departed/dead，**死人默认不进池**；departed/dormant 保留 + `needs_reentry_note`）
+    → 平局两级判据（同章共现 → 活跃度，只改排序不动打分）→ 阈值 → 一角色一槽位。
+    `characters` 新增 6 列（status/last_seen_chapter/appearance_count/status_evidence/disappear_mode/disappear_chapter）。
+  - **阈值标定**：临时项目 8 角色 × 6 槽位真机 embedding（零 LLM），正例最低 **0.585** / 负例最高 **0.596**，
+    Top1 六槽位全中 → **`MIN_SCORE` 0.50 → 0.58**（交叠区下沿，保全部正例；标定表 `outputs/选角阈值标定.md`，
+    临时项目级联删验证残留 0）。
+  - **时序修正（自查发现）**：出场校验（剔死角色改 `recall_chars`）必须在**落库前**跑才持久化；
+    选角移到落库后 `_run_casting()`（绝不抛异常，失败置 `casting_reason`）。
+  - **顺带修 2 个存量 bug**：① `distill_all` 批删 draft 不清向量（`query().delete()` 绕过 ORM 钩子，
+    孤儿块每重跑积一批）→ 批删前逐 id `remove_source` 清两套向量；② `_book_context` 裸 `limit(40)`
+    死人平等进上下文 → `filter(status!="dead")` + 按 `last_seen` 排序。
+  - **API**：`routers/casting.py` 4 端点（读/重算/手改/重算出场派生）；app 装配 **164 路由**（+4）。
+  - **需重启后端**生效（新表/新列/新路由）。
 - **★ 7.1.3 凡人修仙传真机实测 —— 成本基线（1~30 章 `--stage all`，232s）**：
   - **跑批通过**：概括 29 章 0 失败 → 匿名化 41 映射触及 29/29 章 → 段 27 → 分类 27/27
     → 弧 7（covered 27 / leftover 0）→ **人物/势力类专名残留 0** ✅

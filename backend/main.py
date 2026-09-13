@@ -42,9 +42,9 @@ from app.routers import (
     plot_templates,
     # ——Phase 7.2 篇规划 ——
     plans,
-)
-
-# 统一日志：必须在任何业务模块打日志之前初始化，否则 INFO 级日志会被
+    # ——Phase 7.3 角色选角 ——
+    casting,
+)# 统一日志：必须在任何业务模块打日志之前初始化，否则 INFO 级日志会被
 # logging 的「last resort」处理器（仅 WARNING+）静默丢掉。级别可用 NA_LOG_LEVEL 覆盖。
 setup_logging()
 
@@ -77,9 +77,9 @@ for r in (
     usage, feedback,                                  # Phase 4.2/4.3 观测消费端
     plot_templates,                                   # Phase 7.1 情节模板库
     plans,                                            # Phase 7.2 篇规划
+    casting,                                          # Phase 7.3 角色选角
 ):
     app.include_router(r.router, prefix="/api/v1")
-
 
 # 启动时建表并写入示例作品，保证角色库等模块开箱可用
 @app.on_event("startup")

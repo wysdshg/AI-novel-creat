@@ -5,7 +5,7 @@
 """
 from datetime import datetime
 from sqlalchemy import (
-    String, Integer, Text, Boolean, DateTime, Float, ForeignKey, JSON
+    String, Integer, Text, Boolean, DateTime, Float, ForeignKey, JSON, UniqueConstraint
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -46,6 +46,25 @@ class CharacterORM(Base):
     network_x: Mapped[float | None] = mapped_column(Float, nullable=True)
     network_y: Mapped[float | None] = mapped_column(Float, nullable=True)
     brief: Mapped[str | None] = mapped_column(Text, nullable=True)             # 简介
+    # ---- 角色状态（Phase 7.3 ③ 角色状态门，2026-09-13）----
+    # 🔴 **派生 vs 抽取要分工**（7.3.5 定稿，这里先把字段备齐）：
+    #   `last_seen_chapter` / `appearance_count` 是**纯派生** —— 扫 `chapter_memories.characters`
+    #     统计即可，可重算可验证（由 `casting_crud.refresh_character_appearances` 刷）。
+    #     **绝不能交给 LLM**：统计问题是确定性任务，模型只会引入漂移。
+    #   `status` 等必须**抽取 + 人工可改**："最后出场"≠"死了"（可能是闭关/失踪/退居幕后），
+    #     纯统计推不出来，但模型也会猜错 → 所以给作者留改的口子。
+    # 四态语义（7.3.5）：alive 在世 / dormant 蛰伏 / departed 离场 / dead 已死。
+    # `dead` 默认不进选角候选池 —— 没有这一条，casting 会系统性产出"第 60 章用第 3 章选的
+    # 已在 40 章前死掉的角色"这类连续性错误。
+    status: Mapped[str] = mapped_column(String(20), default="alive", index=True)
+    last_seen_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    appearance_count: Mapped[int] = mapped_column(Integer, default=0)
+    status_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)   # 哪一章哪句话（可回溯）
+    # explicit=有具体离场事件 / silent=只是后续没再写 / unknown
+    # 为什么必须区分：silent 退场的人回归几乎不需要理由（他就是没被写），
+    # explicit 失踪/死亡的人回归**必须交代** —— 没有这个区分，"编回归理由"无从下手。
+    disappear_mode: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    disappear_chapter: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -649,6 +668,50 @@ class ArticlePlanORM(Base):
     origin: Mapped[str] = mapped_column(String(20), default="template")
     raw_ai: Mapped[dict] = mapped_column(JSON, default=dict)           # AI 原始输出（留档，供反馈对比）
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)  # draft|confirmed
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
+                                                 onupdate=datetime.utcnow)
+
+
+class PlanCastingORM(Base):
+    """篇规划的角色选角结果（Phase 7.3 ③，2026-09-13）：**槽位 → 本书角色** 的绑定。
+
+    🔴 **本表是 casting 的唯一真相源**，`article_plans.plan["castings"]` 里只放
+    **只读展示冗余**。为什么不让它直接住在 plan JSON 里（2026-09-12 定稿）：
+    人工调整 casting（把"引路人师长"从甲改成乙）要频繁改这一小块，而 plan JSON 走的是
+    「整体读改写」——每次都要 deepcopy 整份 plan。7.2 已经在这里踩过
+    **SQLAlchemy JSON 列共享引用污染**（读出来改完写回，new==old → UPDATE 被静默跳过，
+    实测"接口返回正确但库纹丝不动、DeepSeek 白调"）。拆表后两不相干：
+    计划行归计划行，选角归选角。
+
+    生命周期：`generate_plan` 时全量重算（一个 plan 一份 casting）→ 作者可在前端手动改
+    （`source="manual"`，重算时**不覆盖**，见 `casting_crud`）→ 拍板后驱动生成。
+
+    `UNIQUE(plan_id, slot)`：同一篇里同一功能位只能绑一个角色 —— 这是"同一配角在整篇
+    身份一致"（门槛 6）的**数据库级**保证，不靠调用方自觉。
+
+    `needs_reentry_note`（Phase 7.3.5 预留字段）：该角色是"蛰伏/离场"态却被选中时置真，
+    要求生成时交代回归理由。7.3 只写不算，7.3.5 接上回归材料包。
+    """
+    __tablename__ = "plan_castings"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "slot", name="uq_plan_casting_slot"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    plan_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
+    article_id: Mapped[str] = mapped_column(String(36), index=True)
+    template_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    slot: Mapped[str] = mapped_column(String(60))              # 功能槽位名（如 引路人师长）
+    slot_desc: Mapped[str | None] = mapped_column(Text, nullable=True)   # 槽位功能说明（快照）
+    slot_mode: Mapped[str | None] = mapped_column(String(10), nullable=True)  # 助力|阻碍|见证|对手
+    # 匹配结果（未匹配到时 character_id 为空 → 该槽位走 new_chars，不硬凑）
+    character_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    character_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)     # 显式余弦（可解释）
+    # auto=系统选角 / manual=作者手改（重算时保留）
+    source: Mapped[str] = mapped_column(String(10), default="auto")
+    needs_reentry_note: Mapped[bool] = mapped_column(Boolean, default=False)  # 7.3.5 用
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow,
                                                  onupdate=datetime.utcnow)

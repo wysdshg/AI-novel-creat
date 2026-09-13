@@ -4,8 +4,8 @@ import uuid
 from sqlalchemy.orm import Session
 
 from app.models.orm import (
-    ArticleORM, ChapterMemoryORM, ChapterORM, DiscussionMessageORM,
-    ReferenceDocORM, VolumeORM,
+    ArticleORM, ArticlePlanORM, ChapterMemoryORM, ChapterORM, DiscussionMessageORM,
+    PlanCastingORM, ReferenceDocORM, VolumeORM,
 )
 from app.schemas.volume import VolumeCreate, VolumeUpdate
 
@@ -80,6 +80,15 @@ def delete_volume(db: Session, project_id: str, volume_id: str) -> bool:
         db.query(ReferenceDocORM).filter(
             ReferenceDocORM.project_id == project_id,
             ReferenceDocORM.article_id.in_(article_ids),
+        ).delete(synchronize_session=False)
+        # 篇规划与选角（Phase 7.3 ③）：卷删了 → 其下篇的 plan/casting 也必须清
+        db.query(PlanCastingORM).filter(
+            PlanCastingORM.project_id == project_id,
+            PlanCastingORM.article_id.in_(article_ids),
+        ).delete(synchronize_session=False)
+        db.query(ArticlePlanORM).filter(
+            ArticlePlanORM.project_id == project_id,
+            ArticlePlanORM.article_id.in_(article_ids),
         ).delete(synchronize_session=False)
         db.query(ArticleORM).filter(ArticleORM.id.in_(article_ids)).delete(
             synchronize_session=False)

@@ -31,6 +31,10 @@ except Exception:  # noqa: BLE001 - 防御：循环导入时不炸模块加载
 SCALE_ARC = "arc"
 SCALE_SEGMENT = "segment"
 SOURCE_TYPE = "plot_template"
+# Phase 7.3 ②：cast 槽位的独立索引空间。**必须与模板块分开**：
+# 模板块回答"这个套路是什么"，cast 块回答"这个功能位要什么样的人" ——
+# 混在一个 source_type 里做 KNN，选角查询会被 beat 文本淹没。
+SOURCE_TYPE_CAST = "plot_cast"
 
 # RRF 常数（与 A 线 pick_relevant 同源）
 RRF_K = 60
@@ -87,6 +91,46 @@ def template_chunks(t: PlotTemplateORM) -> list[str]:
     return chunks
 
 
+def structure_casts(t: PlotTemplateORM) -> list[dict]:
+    """取模板的 cast 槽位（`structure["cast"]`）。缺 cast 返回 []（老模板未凝练 cast）。"""
+    cast = (t.structure or {}).get("cast") or []
+    return [c for c in cast if isinstance(c, dict)]
+
+
+def cast_slot_text(c: dict) -> str:
+    """单个槽位的**向量化文本**（Phase 7.3 ②）。
+
+    🔴 为什么是「功能描述 + srcs 典型实现」的**混合文本**（2026-09-12 讨论定稿）：
+    纯功能描述（"主角的导师型角色，掌握关键资源"）过于抽象 —— 与作者写的
+    「具体角色人设」（"青云宗长老，脾气古怪，一手炼器绝活"）向量距离偏大，
+    分数会**整体偏低且区分度差**，标定阈值时会误判成"全都不匹配"。
+    掺进 srcs 的具体实现文本（各源书该槽位的 role_desc）后，向量落在
+    "半抽象半具体"的位置，与真实人设的距离更合理。
+
+    `slot` 名前置是刻意的：让"引路人师长"这个词本身参与匹配（作者口述
+    常常就是这么说的）。
+    """
+    parts = [str(c.get("slot") or "")]
+    if c.get("desc"):
+        parts.append(str(c["desc"]))
+    if c.get("mode"):
+        parts.append(f"定位：{c['mode']}")
+    for s in (c.get("srcs") or []):
+        if isinstance(s, dict) and s.get("desc"):
+            parts.append(str(s["desc"]))
+    return "｜".join(p for p in parts if p.strip())
+
+
+def cast_chunks(t: PlotTemplateORM) -> list[str]:
+    """cast 级切块（每槽位一块），与 `structure["cast"]` **下标一一对应**。
+
+    ⚠️ 顺序契约：`chunk_idx == cast 数组下标`。命中后直接用
+    `structure["cast"][chunk_idx]` 反查，不必解析 chunk 文本
+    （见 orm 里 source_stats 的约定与 7.3 方案）。
+    """
+    return [cast_slot_text(c) for c in structure_casts(t)]
+
+
 def search_text(t: PlotTemplateORM) -> str:
     """模板级检索/展示文本（目录用）。"""
     parts = [t.name, t.logline or "", " ".join(t.genre_tags or [])]
@@ -99,13 +143,20 @@ def search_text(t: PlotTemplateORM) -> str:
 # 向量化（旁路，失败不影响 CRUD）
 # ---------------------------------------------------------------------------
 def index_template(db: Session, t: PlotTemplateORM) -> int:
-    """重建模板向量（先删旧块再建 模板级 + beat 级块）。返回块数；失败返回 0（静默）。"""
+    """重建模板向量（先删旧块再建 模板级 + beat 级 + **cast 级**）。返回块数；失败返回 0（静默）。
+
+    ⚠️ **两个 source_type 都要清**（Phase 7.3 ②）：只清 `plot_template` 会留下
+    `plot_cast` 的孤儿块 —— 槽位改了或 cast 被删光，旧槽位向量还在池子里，
+    选角会召回一个在新 cast 里不存在的下标（反查 `cast[idx]` 直接 IndexError 或错位）。
+    """
     try:
         vector_index.remove_source(db, GLOBAL, SOURCE_TYPE, t.id)
+        vector_index.remove_source(db, GLOBAL, SOURCE_TYPE_CAST, t.id)
         n = vector_index.index_chunks(db, GLOBAL, SOURCE_TYPE, t.id, template_chunks(t))
-        if n:
-            logger.info(f"[plot_tpl] 模板已向量化 name={t.name} beats={n}")
-        return n
+        n_cast = vector_index.index_chunks(db, GLOBAL, SOURCE_TYPE_CAST, t.id, cast_chunks(t))
+        if n or n_cast:
+            logger.info(f"[plot_tpl] 模板已向量化 name={t.name} beats={n} cast={n_cast}")
+        return n + n_cast
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[plot_tpl] 模板向量化失败（不影响保存）: {type(e).__name__}: {e}")
         return 0
@@ -186,7 +237,10 @@ def delete(db: Session, template_id: str) -> bool:
     o = db.query(PlotTemplateORM).filter_by(id=template_id).first()
     if o is None:
         return False
+    # 两个 source_type 都要清：漏掉 plot_cast 会让槽位向量永久留在全局池里
+    # —— 模板已不存在，但选角仍会召回到它的槽位（Phase 7.3 ②）。
     vector_index.remove_source(db, GLOBAL, SOURCE_TYPE, template_id)
+    vector_index.remove_source(db, GLOBAL, SOURCE_TYPE_CAST, template_id)
     db.delete(o)
     db.commit()
     return True

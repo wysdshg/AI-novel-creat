@@ -437,10 +437,23 @@ def distill_all(db: Session, *, book_names: list[str] | None = None,
     失败单组不中断整体（记录在结果里，含原始输出片段便于排查）。
     """
     if replace_drafts:
+        # ⚠️ 连带清向量（2026-09-13 修）：`query().delete()` 是**批量 SQL**，绕过 ORM 的
+        # 对象级钩子 —— 只删行不清 `vector_chunks` 的话，每重跑一次 distill 就往全局
+        # 池子里积一批**指向已不存在模板**的孤儿块（模板块 + cast 块两套）。
+        # 后果不只是"浪费空间"：全局 KNN 的 top-k 名额会被这些死块挤占，
+        # 而且 cast 孤儿块在选角时反查 `structure["cast"][idx]` 会直接取到错位/越界。
+        old_ids = [r[0] for r in db.query(PlotTemplateORM.id).filter_by(status="draft").all()]
+        for tid in old_ids:
+            try:
+                vector_index.remove_source(db, tpl_crud.GLOBAL, tpl_crud.SOURCE_TYPE, tid)
+                vector_index.remove_source(db, tpl_crud.GLOBAL, tpl_crud.SOURCE_TYPE_CAST, tid)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[plot_distill] 清理 draft 向量失败 id={str(tid)[:8]}: "
+                               f"{type(e).__name__}: {e}")
         n = db.query(PlotTemplateORM).filter_by(status="draft").delete(synchronize_session=False)
         db.commit()
         if n:
-            logger.info(f"[plot_distill] 清理旧 draft 模板 {n} 个（reviewed 不动）")
+            logger.info(f"[plot_distill] 清理旧 draft 模板 {n} 个（reviewed 不动）+ 其向量块")
 
     arcs = collect_arcs(db, book_names)
     groups = cluster_arcs(db, arcs, threshold=threshold)
