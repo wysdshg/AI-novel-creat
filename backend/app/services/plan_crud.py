@@ -24,7 +24,7 @@ from app.models.orm import (
     ArticlePlanORM, ArticleORM, ChapterORM,
     CharacterORM, ForeshadowORM, VolumeORM,
 )
-from app.services.plot_import import _ds_post, ds_key, parse_json_loose
+from app.services.plot_import import _ds_post, ds_key, make_usage_cb, parse_json_loose
 from app.services import plot_template_crud as tpl_crud
 
 logger = logging.getLogger(__name__)
@@ -84,20 +84,27 @@ def _templates_for_plan(db: Session, hint: str) -> tuple[list[dict], list[str]]:
 
 def _plan_prompt(ctx: dict, templates: list[dict], hint: str,
                  n_chapters: int) -> str:
+    """构造规划 prompt。
+
+    🔴 **模板注入瘦身（2026-09-13，成本优化）**：模板只送「骨架」——
+    `name / logline / rhythm` + 各 phase 的 **beat 名**，**不送 variants 明细与 cast 明细**。
+    原因（实测）：一个模板的 `structure` JSON 有 4062~6620 字符，variants 占了绝大部分，
+    top-2 检索就是 8000+ 字符/次；而规划阶段**只需要知道"有哪些节拍可选"**，
+    "某本书在这个节拍上怎么处理的"对规划毫无用处（那是凝练阶段的输入）。
+    瘦身后模板块从 8000+ 字符降到数百字符量级，属于纯浪费的减法。
+
+    保留 `beat 名` 是刻意的：模型要靠节拍名去填 `template_ref` 字段，这一层不能砍。
+    """
     t_blocks = []
     for t in templates:
         st = t.get("structure") or {}
-        phases = []
+        phase_lines = []
         for ph in st.get("phases") or []:
-            beats = "；".join(
-                f"{b.get('beat')}（" + "；".join(
-                    f"{v.get('src')}:{v.get('how')}" for v in (b.get("variants") or [])) + "）"
-                for b in ph.get("beats") or [])
-            phases.append(f"  · {ph.get('phase')}：{beats}")
+            beats = "、".join(b.get("beat") or "—" for b in (ph.get("beats") or []))
+            phase_lines.append(f"  · {ph.get('phase')}：{beats}")
         t_blocks.append(
             f"《{t['name']}》—— {t.get('logline') or ''}（节奏 {t.get('rhythm') or '—'}）\n"
-            + "\n".join(phases)
-            + ("\n常见翻车点：" + "；".join(t.get("pitfalls") or []) if t.get("pitfalls") else "")
+            + "\n".join(phase_lines)
         )
     t_text = "\n\n".join(t_blocks) if t_blocks else "（无匹配模板，请根据口述与上下文自由设计本篇结构）"
 
@@ -170,7 +177,7 @@ def generate_plan(db: Session, project_id: str, article_id: str, *,
     origin = "template" if templates else "free"
 
     raw = _ds_post(key, _plan_prompt(ctx, templates, hint, n_chapters),
-                   max_tokens=6000)
+                   max_tokens=6000, on_usage=make_usage_cb("ds_plan"))
     data = parse_json_loose(raw) or {}
     lines = _valid_lines(data.get("lines"))
     if not lines:
@@ -261,7 +268,7 @@ def refine_line(db: Session, project_id: str, article_id: str, *,
         + json.dumps(neighbors[:6], ensure_ascii=False)[:1500]
         + "\n\n输出 JSON（单行对象，字段与输入相同）："
     )
-    raw = _ds_post(key, prompt, max_tokens=800)
+    raw = _ds_post(key, prompt, max_tokens=800, on_usage=make_usage_cb("ds_refine"))
     data = parse_json_loose(raw) or {}
     data.setdefault("no", line_no)
     fixed = _valid_lines([data])

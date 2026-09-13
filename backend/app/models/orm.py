@@ -538,6 +538,11 @@ class LlmUsageLogORM(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # 提示缓存计量（2026-09-13）：DeepSeek 等厂商会把输入 token 拆成
+    # 「命中缓存」与「未命中」两档，**单价差 50 倍**（命中 $0.003/M vs 未命中 $0.15/M）。
+    # 不拆开记的话，成本分析会完全失真 —— 只知道"输入 10 万 token"，不知道贵在哪一档。
+    cache_hit_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_miss_tokens: Mapped[int] = mapped_column(Integer, default=0)
     estimated: Mapped[bool] = mapped_column(Boolean, default=False)  # True = 按字符估算，非厂商回传
     ok: Mapped[bool] = mapped_column(Boolean, default=True)          # False = 调用失败（也要计量，失败同样烧钱）
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)

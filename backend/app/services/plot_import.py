@@ -95,10 +95,15 @@ def sf_key(db: Session) -> str | None:
 
 
 def _chat_post(url: str, key: str, body: dict, *, timeout: int,
-               rate: RateLimiter | None = None, label: str = "LLM") -> str:
+               rate: RateLimiter | None = None, label: str = "LLM",
+               on_usage=None) -> str:
     """带限速 + 429/5xx 指数退避的 chat 调用（**厂商无关**，不含 db 依赖）。
 
     并发路径专用：Key 由调用方在主线程取好传进来（Session 非线程安全）。
+
+    `on_usage(usage: dict, duration_ms: int, ok: bool)`（2026-09-13 加）：把厂商回传的
+    `usage` 交给调用方记账。**用回调而不是直接 write** —— 本函数是线程无关的纯 HTTP 层，
+    持 Session 会破坏"Session 非线程安全"的既有约定；且记账失败绝不冒泡（回调内部自吞）。
     """
     rate = rate or RateLimiter()
     last_err: Exception | None = None
@@ -110,9 +115,12 @@ def _chat_post(url: str, key: str, body: dict, *, timeout: int,
             method="POST",
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
         )
+        _t0 = time.time()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
+            if on_usage:
+                _safe_usage_cb(on_usage, data.get("usage"), int((time.time() - _t0) * 1000), True)
             return (data["choices"][0]["message"].get("content") or "").strip()
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", "ignore")[:200]
@@ -123,6 +131,8 @@ def _chat_post(url: str, key: str, body: dict, *, timeout: int,
                 time.sleep(backoff)
                 last_err = RuntimeError(f"HTTP {e.code}: {err_body}")
                 continue
+            if on_usage:
+                _safe_usage_cb(on_usage, None, int((time.time() - _t0) * 1000), False)
             raise RuntimeError(f"{label} HTTP {e.code}: {err_body}") from e
         except Exception as e:
             last_err = e
@@ -132,12 +142,22 @@ def _chat_post(url: str, key: str, body: dict, *, timeout: int,
                                f"（{attempt + 1}/{MAX_RETRY}）: {type(e).__name__}: {e}")
                 time.sleep(backoff)
                 continue
+            if on_usage:
+                _safe_usage_cb(on_usage, None, int((time.time() - _t0) * 1000), False)
     raise RuntimeError(f"{label} 调用失败（重试 {MAX_RETRY} 次）: {last_err}")
+
+
+def _safe_usage_cb(cb, usage, duration_ms: int, ok: bool) -> None:
+    """调用记账回调，**任何异常都吞掉** —— 记账永远不许影响模型调用主链路。"""
+    try:
+        cb(usage, duration_ms, ok)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[plot_import] 用量回调失败（不影响调用）: {type(e).__name__}: {e}")
 
 
 def _sf_post(key: str, user_content: str, *, max_tokens: int = 1024,
              temperature: float = 0.3, timeout: int = 120,
-             rate: RateLimiter | None = None) -> str:
+             rate: RateLimiter | None = None, on_usage=None) -> str:
     """硅基流动 Qwen3-8B（**关闭思考** —— Qwen3 思考默认开会吃光输出预算并拖慢 60s+）。"""
     body = {
         "model": SF_MODEL,
@@ -147,7 +167,7 @@ def _sf_post(key: str, user_content: str, *, max_tokens: int = 1024,
         "enable_thinking": False,
     }
     return _chat_post(SF_BASE + "/chat/completions", key, body,
-                      timeout=timeout, rate=rate, label="硅基流动")
+                      timeout=timeout, rate=rate, label="硅基流动", on_usage=on_usage)
 
 
 def ds_key(db: Session) -> str | None:
@@ -166,11 +186,14 @@ def ds_key(db: Session) -> str | None:
 
 def _ds_post(key: str, user_content: str, *, max_tokens: int = 3000,
              temperature: float = 0.2, timeout: int = 300,
-             rate: RateLimiter | None = None) -> str:
+             rate: RateLimiter | None = None, on_usage=None) -> str:
     """DeepSeek V4.1 Flash（**关闭思考**）。
 
     实测（2026-09-11）：`deepseek-flash` 默认思考开，2000 token 预算全被 reasoning 吃光、
     content 返回空且耗时 10.7s；加 `thinking={"type":"disabled"}` 后 **1.7s** 拿到完整 JSON。
+
+    `on_usage`（2026-09-13 加）：DeepSeek 回传 `usage.prompt_cache_hit_tokens` /
+    `prompt_cache_miss_tokens` —— 这两档单价差 50 倍，必须落库才能做成本分析。
     """
     body = {
         "model": DS_MODEL,
@@ -180,17 +203,58 @@ def _ds_post(key: str, user_content: str, *, max_tokens: int = 3000,
         "thinking": {"type": "disabled"},
     }
     return _chat_post(DS_BASE + "/chat/completions", key, body,
-                      timeout=timeout, rate=rate, label="DeepSeek")
+                      timeout=timeout, rate=rate, label="DeepSeek", on_usage=on_usage)
 
 
-def sf_chat(db: Session, user_content: str, **kw) -> str:
+def make_usage_cb(scene: str, *, project_id: str | None = None):
+    """构造一个**自带独立 Session** 的记账回调（离线管线专用，2026-09-13）。
+
+    为什么不自带 Session：`_chat_post` 可能在**并发线程**里执行，而 SQLAlchemy Session
+    非线程安全（见 docs/04）。回调在**调用它的那个线程**里现开现关一个 Session，
+    天然线程安全，且不会与调用方的事务纠缠。
+
+    失败一律静默：记账是旁路，永远不许影响模型调用。
+    """
+    def _cb(usage, duration_ms: int, ok: bool) -> None:
+        try:
+            from app.core import database
+            from app.services import usage_crud
+            database.get_engine()          # 确保 SessionLocal 已初始化（惰性全局）
+            db = database.SessionLocal()
+            try:
+                usage_crud.record_usage(
+                    db, scene=scene, vendor="deepseek" if scene.startswith("ds_") else "siliconflow",
+                    model_name=DS_MODEL if scene.startswith("ds_") else SF_MODEL,
+                    usage=usage, project_id=project_id,
+                    duration_ms=duration_ms, ok=ok,
+                )
+            finally:
+                db.close()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[plot_import] 用量记账失败（不影响调用）scene={scene}: "
+                           f"{type(e).__name__}: {e}")
+    return _cb
+
+
+def sf_chat(db: Session, user_content: str, *, scene: str = "sf_chat", **kw) -> str:
     """调用硅基流动 Qwen3-8B（关闭思考）。429/5xx 指数退避。失败抛 RuntimeError。
 
     带 Key 解析的封装（串行路径用）；并发路径请用 `_sf_post` + 主线程预取的 Key。
+
+    `scene`（2026-09-13）：用量记账的场景名，便于按用途拆分成本。
+    串行路径直接复用调用方的 session 记账（同线程，安全）。
     """
     key = sf_key(db)
     if not key:
         raise RuntimeError("未配置硅基流动 Key（app_configs.retrieval.siliconflow_key）")
+
+    def _cb(usage, duration_ms: int, ok: bool) -> None:
+        from app.services import usage_crud
+        usage_crud.record_usage(db, scene=scene, vendor="siliconflow",
+                                model_name=SF_MODEL, usage=usage,
+                                duration_ms=duration_ms, ok=ok)
+
+    kw.setdefault("on_usage", _cb)
     return _sf_post(key, user_content, **kw)
 
 
@@ -265,7 +329,8 @@ def import_chapters(db: Session, book_dir: str, book_name: str, *,
         text = read_text(ch["path"])
         try:
             summ = sf_chat(db, _summarize_prompt(ch["title"], text),
-                           max_tokens=512, temperature=0.2, rate=rate)
+                           max_tokens=512, temperature=0.2, rate=rate,
+                           scene="sf_summarize")
         except Exception as e:  # noqa: BLE001
             failed += 1
             logger.warning(f"[plot_import] 第{ch['no']}章概括失败（跳过，重跑会补）: "
@@ -346,12 +411,16 @@ def import_chapters_batch(db: Session, book_dir: str, book_name: str, *,
     bs = max(1, int(batch_size))
     batches = [pending[i:i + bs] for i in range(0, len(pending), bs)]
 
+    # 记账回调（2026-09-13）：工作线程里现开现关独立 Session —— 天然的线程安全，
+    # 且与主线程的写库事务完全隔离。
+    on_usage = make_usage_cb("sf_summarize")
+
     def run_batch(batch: list[dict]):
         """工作线程：只读磁盘 + 网络，不碰 session。"""
         items = [{"no": c["no"], "title": c["title"], "text": read_text(c["path"])}
                  for c in batch]
         raw = _sf_post(key, _batch_prompt(items), max_tokens=400 * len(batch),
-                       temperature=0.2, rate=rate)
+                       temperature=0.2, rate=rate, on_usage=on_usage)
         data = parse_json_loose(raw) or {}
         got: dict[int, str] = {}
         for row in data.get("chapters") or []:
@@ -435,7 +504,8 @@ def import_chapters_batch(db: Session, book_dir: str, book_name: str, *,
         for c in still_missing:
             try:
                 s = _sf_post(key, _summarize_prompt(c["title"], read_text(c["path"])),
-                             max_tokens=512, temperature=0.2, rate=rate).strip()
+                             max_tokens=512, temperature=0.2, rate=rate,
+                             on_usage=make_usage_cb("sf_summarize")).strip()
                 if not _valid_summary(s):
                     s = ""
             except Exception as e:  # noqa: BLE001
@@ -536,7 +606,7 @@ def segment_chapters(db: Session, book_name: str, *, batch: int = 10,
     def run_batch(b_rows: list) -> dict:
         numbered = "\n".join(f"第{r.chapter_no}章：{r.summary}" for r in b_rows)
         raw = _sf_post(key, _segment_prompt(numbered, None), max_tokens=256 * len(b_rows),
-                       temperature=0.2, rate=rate)
+                       temperature=0.2, rate=rate, on_usage=make_usage_cb("sf_segment"))
         return parse_json_loose(raw) or {}
 
     results: dict[int, dict] = {}
@@ -709,7 +779,7 @@ def label_segments(db: Session, book_name: str, *,
                 "下面是小说的一个情节段概括。请给它一个「情节类型」标签（4~8 字，"
                 "如：学院大比/秘境寻宝/势力冲突/日常过渡/升级突破/结盟交涉/追逃猎杀）。"
                 "只输出标签本身，不要引号和句号。\n\n" + summary,
-                max_tokens=32, temperature=0.2, rate=rate,
+                max_tokens=32, temperature=0.2, rate=rate, scene="sf_label",
             )
             label = label.strip().strip("「」\"'。.")
         except Exception as e:  # noqa: BLE001
@@ -799,7 +869,8 @@ def merge_arcs(db: Session, book_name: str, *, rate: RateLimiter | None = None,
     arcs: list[dict] = []
     raws: list[str] = []
     for b in batches:
-        raw = _ds_post(key, _arc_prompt(b), max_tokens=max_tokens, rate=rate)
+        raw = _ds_post(key, _arc_prompt(b), max_tokens=max_tokens, rate=rate,
+                       on_usage=make_usage_cb("ds_arc"))
         raws.append(raw)
         got = (parse_json_loose(raw) or {}).get("arcs") or []
         if not got:

@@ -30,7 +30,8 @@ from app.models.orm import BookAliasORM, ChapterSummaryORM, PlotTemplateORM
 from app.services import plot_template_crud as tpl_crud
 from app.services import vector_index
 from app.services.anonymizer import anonymize_text
-from app.services.plot_import import DS_KEY_CONFIG, _ds_post, ds_key, parse_json_loose
+from app.services.plot_import import (DS_KEY_CONFIG, _ds_post, ds_key,
+                                      make_usage_cb, parse_json_loose)
 
 logger = logging.getLogger(__name__)
 
@@ -383,7 +384,8 @@ def distill_template(db: Session, arcs: list[dict], *, name_hint: str | None = N
     # LLM 偶发格式问题（如输出被截断）→ 重试一次，避免"偶尔一次坏输出就丢一组"
     raw, data = "", {}
     for attempt in range(2):
-        raw = _ds_post(key, _distill_prompt(arcs), max_tokens=max_tokens)
+        raw = _ds_post(key, _distill_prompt(arcs), max_tokens=max_tokens,
+                       on_usage=make_usage_cb("ds_distill"))
         data = parse_json_loose(raw) or {}
         if data.get("name") and data.get("structure"):
             break

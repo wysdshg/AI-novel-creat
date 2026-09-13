@@ -39,11 +39,16 @@ def record_usage(db: Session, *, scene: str, vendor: str | None = None,
                  completion_text: str | None = None) -> None:
     """记录一次模型调用。**失败静默**。
 
-    - 传了 `usage`（适配器 `last_usage`）→ 用真实数值，`estimated` 取其自带标记；
+    - 传了 `usage`（适配器 `last_usage` / 网关原始响应）→ 用真实数值，`estimated` 取其自带标记；
     - 没传但给了 `prompt_text` / `completion_text` → 按字符估算，标 `estimated=True`；
     - 两者都没有 → 直接返回（不记空行，避免污染统计）。
+
+    缓存拆分（2026-09-13）：厂商（DeepSeek）把输入 token 分成命中/未命中两档，单价差 50 倍。
+    归一化三个可能来源（`cache_hit_tokens` / `prompt_cache_hit_tokens` / `prompt_tokens_details.cached_tokens`），
+    同时兼容 DeepSeek 特有的 `prompt_cache_miss_tokens`。
     """
     try:
+        hit = miss = 0
         if isinstance(usage, dict) and (
             usage.get("prompt_tokens") is not None or usage.get("completion_tokens") is not None
         ):
@@ -51,6 +56,7 @@ def record_usage(db: Session, *, scene: str, vendor: str | None = None,
             c = int(usage.get("completion_tokens") or 0)
             total = int(usage.get("total_tokens") or (p + c))
             est = bool(usage.get("estimated"))
+            hit, miss = _extract_cache(usage, p)
         elif prompt_text is not None or completion_text is not None:
             p = estimate_tokens(prompt_text or "")
             c = estimate_tokens(completion_text or "")
@@ -68,6 +74,8 @@ def record_usage(db: Session, *, scene: str, vendor: str | None = None,
             prompt_tokens=p,
             completion_tokens=c,
             total_tokens=total,
+            cache_hit_tokens=hit,
+            cache_miss_tokens=miss,
             estimated=est,
             ok=ok,
             duration_ms=duration_ms,
@@ -83,17 +91,54 @@ def record_usage(db: Session, *, scene: str, vendor: str | None = None,
             logger.debug(f"[usage] rollback 失败: {type(e2).__name__}: {e2}")
 
 
+def _extract_cache(usage: dict, prompt_total: int) -> tuple[int, int]:
+    """从厂商 usage 里抽出（命中缓存, 未命中缓存）两档输入 token。
+
+    兼容三种厂商命名（2026-09-13 实测确认 DeepSeek 走第二种）：
+    1. 通用：`cache_hit_tokens` / `cache_miss_tokens`
+    2. DeepSeek：`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`
+    3. OpenAI 系：`prompt_tokens_details.cached_tokens`（只给命中，未命中需反算）
+
+    **未知归一为 (0, 0) 而不是 (0, prompt_total)** —— 后者会把"厂商没回传缓存信息"
+    伪装成"全部未命中"，把统计打成一片红，反而误导优化方向。
+    """
+    def _i(v):
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    hit = _i(usage.get("cache_hit_tokens") or usage.get("prompt_cache_hit_tokens"))
+    if not hit:
+        det = usage.get("prompt_tokens_details")
+        if isinstance(det, dict):
+            hit = _i(det.get("cached_tokens"))
+    miss = _i(usage.get("cache_miss_tokens") or usage.get("prompt_cache_miss_tokens"))
+    if not miss and hit:
+        miss = max(0, prompt_total - hit)
+    if not hit and not miss:
+        return 0, 0
+    return hit, miss
+
+
 def _bucket(rows: list[LlmUsageLogORM]) -> dict:
-    """把一组日志聚合出 calls / tokens / estimated 比例。"""
+    """把一组日志聚合出 calls / tokens / 缓存命中率 / estimated 比例。"""
     calls = len(rows)
     tokens = sum(r.total_tokens or 0 for r in rows)
     est_calls = sum(1 for r in rows if r.estimated)
     failed = sum(1 for r in rows if not r.ok)
+    hit = sum(r.cache_hit_tokens or 0 for r in rows)
+    miss = sum(r.cache_miss_tokens or 0 for r in rows)
+    tracked = hit + miss
     return {
         "calls": calls,
         "prompt_tokens": sum(r.prompt_tokens or 0 for r in rows),
         "completion_tokens": sum(r.completion_tokens or 0 for r in rows),
         "total_tokens": tokens,
+        "cache_hit_tokens": hit,
+        "cache_miss_tokens": miss,
+        # 只在厂商确实回传了缓存拆分时才算命中率，否则 None（不假装有数据）
+        "cache_hit_rate": round(hit / tracked, 4) if tracked else None,
         "estimated_calls": est_calls,
         "failed_calls": failed,
     }
@@ -145,6 +190,8 @@ def summary(db: Session, *, project_id: str | None = None, days: int = 30) -> di
                 "prompt_tokens": r.prompt_tokens,
                 "completion_tokens": r.completion_tokens,
                 "total_tokens": r.total_tokens,
+                "cache_hit_tokens": r.cache_hit_tokens or 0,
+                "cache_miss_tokens": r.cache_miss_tokens or 0,
                 "estimated": r.estimated,
                 "ok": r.ok,
                 "duration_ms": r.duration_ms,

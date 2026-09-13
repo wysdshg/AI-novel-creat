@@ -30,7 +30,8 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.models.orm import BookAliasORM, ChapterSummaryORM
-from app.services.plot_import import RateLimiter, _ds_post, ds_key, parse_json_loose
+from app.services.plot_import import (RateLimiter, _ds_post, ds_key,
+                                      make_usage_cb, parse_json_loose)
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,8 @@ def extract_cast(db: Session, book_name: str, *, batch_chapters: int = _BATCH_CH
         # ⚠️ 读 raw（匿名化前的原文）：对已替换文本再抽取会产生「一星境界2」这类链条污染
         texts = [(r.summary_raw or r.summary or "") for r in chunk]
         raw = _ds_post(key, _extract_prompt(texts),
-                       max_tokens=4000, temperature=0.1, rate=rate)
+                       max_tokens=4000, temperature=0.1, rate=rate,
+                       on_usage=make_usage_cb("ds_cast_extract"))
         data = parse_json_loose(raw) or {}
         if not protagonist and data.get("protagonist"):
             protagonist = str(data["protagonist"]).strip()
